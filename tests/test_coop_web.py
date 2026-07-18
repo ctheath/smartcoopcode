@@ -1,6 +1,7 @@
 import base64
 import os
 import tempfile
+import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +59,7 @@ class FakeDoorController:
         self.position = position
         self.moves = []
         self.cleaned_up = False
+        self.stopped = False
 
     def current_position(self):
         return self.position
@@ -71,6 +73,9 @@ class FakeDoorController:
             timed_out=False,
             already_in_position=False,
         )
+
+    def stop_motor(self, target_state=None):
+        self.stopped = True
 
     def cleanup(self):
         self.cleaned_up = True
@@ -317,7 +322,7 @@ class RunDoorWebTests(unittest.TestCase):
         )
         return runtime, run_controller
 
-    def test_status_omits_run_door_when_not_configured(self):
+    def test_status_nulls_run_door_when_not_configured(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = coop_door.DoorConfig(
                 latitude=40.0,
@@ -446,6 +451,20 @@ class RunDoorWebTests(unittest.TestCase):
         )
 
         self.assertEqual(400, response.status_code)
+
+    def test_stop_waits_for_hardware_lock_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, run_controller = self.make_runtime(tmp)
+            runtime._hardware_lock.acquire()
+            stopper = threading.Thread(target=runtime.stop)
+            stopper.start()
+            stopper.join(timeout=0.2)
+            self.assertTrue(stopper.is_alive())
+            runtime._hardware_lock.release()
+            stopper.join(timeout=2)
+            self.assertFalse(stopper.is_alive())
+            self.assertTrue(run_controller.stopped)
+            self.assertTrue(runtime.controller.cleaned_up)
 
 
 if __name__ == "__main__":

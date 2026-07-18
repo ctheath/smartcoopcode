@@ -138,6 +138,9 @@ class CoopWebRuntime:
         except Exception as exc:
             errors.append(f"run_schedule_error: {type(exc).__name__}: {exc}")
 
+        # Reed input reads are atomic and electrically independent of the
+        # driven pins, so this is intentionally unlocked (unlike the coop's
+        # _position_snapshot, which caches under the hardware lock).
         try:
             position = self.run_controller.current_position()
         except Exception as exc:
@@ -146,6 +149,8 @@ class CoopWebRuntime:
 
         state = self.run_state_store.read()
         last_attempt = _last_attempt_from_state(state)
+        # No unknown_position-style error here: None is the run door's normal
+        # daytime reading, since its reed can only prove "closed".
         if last_attempt:
             if last_attempt.get("position_status") == "position_unverified":
                 errors.append("run_position_unverified")
@@ -221,9 +226,10 @@ class CoopWebRuntime:
         self._stop_scheduler.set()
         if self._scheduler_thread:
             self._scheduler_thread.join(timeout=5)
-        if self.run_controller is not None:
-            self.run_controller.stop_motor()
-        self.controller.cleanup()
+        with self._hardware_lock:
+            if self.run_controller is not None:
+                self.run_controller.stop_motor()
+            self.controller.cleanup()
 
     def _scheduler_loop(self) -> None:
         while not self._stop_scheduler.is_set():
