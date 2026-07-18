@@ -1,0 +1,18 @@
+[Unit]
+Description=Sunrise/sunset chicken coop door controller
+Wants=time-sync.target
+After=time-sync.target
+
+[Service]
+Type=simple
+User=chance
+Group=chance
+WorkingDirectory=/home/chance/coophub
+EnvironmentFile=/etc/coop-door/web.env
+ExecStart=/home/chance/coophub/.venv/bin/python /home/chance/coophub/coop_web.py --config /home/chance/coophub/coop_door.ini --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=30
+StateDirectory=coop-door
+
+[Install]
+WantedBy=multi-user.target

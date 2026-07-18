@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Coop Door</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Smart Coop</p>
+          <h1>Door Control</h1>
+        </div>
+        <div id="connection" class="pill">Checking</div>
+      </header>
+
+      <section class="status-grid" aria-label="Door status">
+        <article class="panel primary-status">
+          <span class="label">Current Position</span>
+          <strong id="position">Unknown</strong>
+          <span id="busy" class="hint">Idle</span>
+        </article>
+        <article class="panel">
+          <span class="label">Schedule Now</span>
+          <strong id="desired">Unknown</strong>
+          <span id="next-change" class="hint">Next scheduled change unknown</span>
+          <span id="manual-override" class="hint"></span>
+        </article>
+      </section>
+
+      <section class="panel actions" aria-label="Manual controls">
+        <div>
+          <span class="label">Manual Control</span>
+          <p id="command-result" class="hint">Commands move the door now and hold until the next scheduled change.</p>
+        </div>
+        <div class="button-row">
+          <button id="open-button" type="button" data-action="open">Open</button>
+          <button id="close-button" type="button" data-action="closed">Close</button>
+        </div>
+      </section>
+
+      <section class="panel errors" aria-label="Errors">
+        <span class="label">Errors</span>
+        <ul id="errors">
+          <li>No recent errors</li>
+        </ul>
+      </section>
+
+      <footer>
+        <span id="updated">Not updated yet</span>
+      </footer>
+    </main>
+
+    <script>
+      window.COOP_CSRF_TOKEN = "{{ csrf_token }}";
+    </script>
+    <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+  </body>
+</html>
