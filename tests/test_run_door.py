@@ -407,6 +407,66 @@ class ReconcileAllTests(unittest.TestCase):
 
             self.assertEqual([coop_door.STATE_OPEN], run_controller.moves)
 
+    def test_coop_is_reconciled_before_run_door(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self.make_config(tmp)
+            order = []
+
+            class OrderRecorder(RecordingDoorController):
+                def __init__(self, name, position):
+                    super().__init__(position)
+                    self.name = name
+
+                def move_to(self, target_state):
+                    order.append(self.name)
+                    return super().move_to(target_state)
+
+            doors = [
+                (
+                    OrderRecorder("coop", coop_door.STATE_CLOSED),
+                    coop_door.StateStore(config.state_file),
+                    coop_door.desired_event_for_now,
+                ),
+                (
+                    OrderRecorder("run", None),
+                    coop_door.StateStore(config.run_door.state_file),
+                    coop_door.run_desired_event_for_now,
+                ),
+            ]
+
+            coop_door.reconcile_all(
+                datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
+                config,
+                doors,
+                sun_provider=fixed_sun_provider,
+            )
+
+            self.assertEqual(["coop", "run"], order)
+
+    def test_completed_open_holds_without_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self.make_config(tmp)
+            doors, _, run_controller = self.make_doors(
+                config, coop_position=coop_door.STATE_OPEN, run_position=None
+            )
+            coop_door.reconcile_all(
+                datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
+                config,
+                doors,
+                sun_provider=fixed_sun_provider,
+            )
+            run_controller.position = None
+
+            logger = logging.getLogger("tests.reconcile")
+            with self.assertNoLogs(logger, level="WARNING"):
+                coop_door.reconcile_all(
+                    datetime(2026, 4, 25, 12, 5, tzinfo=DENVER),
+                    config,
+                    doors,
+                    sun_provider=fixed_sun_provider,
+                    logger=logger,
+                )
+
     def test_run_door_manual_override_blocks_scheduled_correction(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = self.make_config(tmp)

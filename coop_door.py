@@ -707,10 +707,13 @@ def reconcile_door(
         return
 
     if state_store.was_attempted(event.key):
-        logger.warning(
-            "Already attempted %s and position is still not verified; skipping retry",
-            event.key,
-        )
+        if state_store.read().get("last_verified"):
+            logger.info("Already completed %s; holding position", event.key)
+        else:
+            logger.warning(
+                "Already attempted %s and position is still not verified; skipping retry",
+                event.key,
+            )
         return
 
     result = controller.move_to(event.target_state)
