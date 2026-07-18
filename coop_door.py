@@ -535,12 +535,22 @@ class ActuatorController:
         )
 
     def stop_motor(self, target_state: Optional[str] = None) -> None:
+        # target_state accepted for interface parity with DoorController; the
+        # actuator always coasts - the screw drive self-locks in place.
         self.gpio.output(self.run_config.in1_pin, self.gpio.LOW)
         self.gpio.output(self.run_config.in2_pin, self.gpio.LOW)
 
     def cleanup(self) -> None:
+        """Release only this door's channels; the coop DoorController owns the
+        global GPIO teardown when both controllers share the module."""
         self.stop_motor()
-        self.gpio.cleanup()
+        self.gpio.cleanup(
+            [
+                self.run_config.in1_pin,
+                self.run_config.in2_pin,
+                self.run_config.reed_closed_pin,
+            ]
+        )
 
     def _setup_gpio(self) -> None:
         self.gpio.setmode(self.gpio.BCM)

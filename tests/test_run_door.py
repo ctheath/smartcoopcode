@@ -318,6 +318,30 @@ class ActuatorControllerTests(unittest.TestCase):
         gpio.inputs[coop_door.DEFAULT_RUN_REED_CLOSED_PIN] = gpio.LOW
         self.assertEqual(coop_door.STATE_CLOSED, controller.current_position())
 
+    def test_move_to_rejects_unknown_target(self):
+        controller = self.make_controller(FakeGPIO())
+
+        with self.assertRaises(ValueError):
+            controller.move_to("ajar")
+
+    def test_cleanup_coasts_and_releases_only_run_pins(self):
+        gpio = FakeGPIO()
+        controller = self.make_controller(gpio)
+
+        controller.cleanup()
+
+        self.assertEqual((coop_door.DEFAULT_RUN_IN2_PIN, gpio.LOW), gpio.outputs[-1])
+        self.assertEqual((coop_door.DEFAULT_RUN_IN1_PIN, gpio.LOW), gpio.outputs[-2])
+        self.assertTrue(gpio.cleaned_up)
+        self.assertEqual(
+            [
+                coop_door.DEFAULT_RUN_IN1_PIN,
+                coop_door.DEFAULT_RUN_IN2_PIN,
+                coop_door.DEFAULT_RUN_REED_CLOSED_PIN,
+            ],
+            gpio.cleaned_channels,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

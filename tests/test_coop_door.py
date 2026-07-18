@@ -44,6 +44,7 @@ class FakeGPIO:
         self.outputs = []
         self.setups = []
         self.cleaned_up = False
+        self.cleaned_channels = None
 
     def setmode(self, mode):
         self.mode = mode
@@ -61,8 +62,9 @@ class FakeGPIO:
     def output(self, pin, value):
         self.outputs.append((pin, value))
 
-    def cleanup(self):
+    def cleanup(self, channels=None):
         self.cleaned_up = True
+        self.cleaned_channels = channels
 
 
 class RecordingDoorController:
