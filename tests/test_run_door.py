@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import date, datetime, time as dt_time
+from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -174,6 +174,29 @@ class RunDoorScheduleTests(unittest.TestCase):
         self.assertEqual(coop_door.STATE_CLOSED, event.target_state)
         self.assertEqual("run:closed:2026-06-21T21:05:00-06:00", event.key)
         self.assertEqual(datetime(2026, 6, 22, 7, 0, tzinfo=DENVER), event.next_change_at)
+
+    def test_open_floor_is_valid_wall_time_on_spring_forward_day(self):
+        schedule = coop_door.run_calculate_schedule(
+            date(2026, 3, 8), make_run_config(), sun_provider=summer_sun_provider
+        )
+
+        self.assertEqual(datetime(2026, 3, 8, 7, 0, tzinfo=DENVER), schedule.open_at)
+        self.assertEqual(timedelta(hours=-6), schedule.open_at.utcoffset())
+
+    def test_desired_state_flips_exactly_at_boundaries(self):
+        open_instant = coop_door.run_desired_event_for_now(
+            datetime(2026, 6, 21, 7, 0, tzinfo=DENVER),
+            make_run_config(),
+            sun_provider=summer_sun_provider,
+        )
+        close_instant = coop_door.run_desired_event_for_now(
+            datetime(2026, 6, 21, 21, 5, tzinfo=DENVER),
+            make_run_config(),
+            sun_provider=summer_sun_provider,
+        )
+
+        self.assertEqual(coop_door.STATE_OPEN, open_instant.target_state)
+        self.assertEqual(coop_door.STATE_CLOSED, close_instant.target_state)
 
 
 if __name__ == "__main__":
