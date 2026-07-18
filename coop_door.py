@@ -10,7 +10,7 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 from typing import Callable, Dict, Optional
 from zoneinfo import ZoneInfo
@@ -34,7 +34,22 @@ DEFAULT_IN2_PIN = 27
 DEFAULT_REED_OPEN_PIN = 22
 DEFAULT_REED_CLOSED_PIN = 23
 
+DEFAULT_RUN_IN1_PIN = 5
+DEFAULT_RUN_IN2_PIN = 6
+DEFAULT_RUN_REED_CLOSED_PIN = 24
+
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("coop_door.ini")
+
+
+@dataclass(frozen=True)
+class RunDoorConfig:
+    in1_pin: int = DEFAULT_RUN_IN1_PIN
+    in2_pin: int = DEFAULT_RUN_IN2_PIN
+    reed_closed_pin: int = DEFAULT_RUN_REED_CLOSED_PIN
+    travel_seconds: float = 75.0
+    open_time: dt_time = dt_time(7, 0)
+    close_offset_minutes: int = 35
+    state_file: Path = Path("run_door_state.json")
 
 
 @dataclass(frozen=True)
@@ -57,6 +72,7 @@ class DoorConfig:
     invalid_time_retry_seconds: float = 60.0
     max_sleep_seconds: float = 3600.0
     state_file: Path = Path("coop_door_state.json")
+    run_door: Optional[RunDoorConfig] = None
 
     @property
     def tz(self) -> ZoneInfo:
@@ -200,6 +216,38 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> DoorConfig:
     if brake_pulse_seconds < 0:
         raise ValueError("hardware.brake_pulse_seconds must be greater than or equal to 0")
 
+    state_file = get_path("runtime", "state_file", defaults.state_file)
+
+    run_door = None
+    if parser.has_section("run_door"):
+        run_defaults = RunDoorConfig()
+        open_time = run_defaults.open_time
+        if parser.has_option("run_door", "open_time"):
+            raw_open_time = parser.get("run_door", "open_time").strip()
+            try:
+                open_time = dt_time.fromisoformat(raw_open_time)
+            except ValueError as exc:
+                raise ValueError(
+                    "run_door.open_time must be HH:MM, for example 07:00"
+                ) from exc
+        run_door = RunDoorConfig(
+            in1_pin=get_int("run_door", "in1_pin", run_defaults.in1_pin),
+            in2_pin=get_int("run_door", "in2_pin", run_defaults.in2_pin),
+            reed_closed_pin=get_int(
+                "run_door", "reed_closed_pin", run_defaults.reed_closed_pin
+            ),
+            travel_seconds=get_float(
+                "run_door", "travel_seconds", run_defaults.travel_seconds
+            ),
+            open_time=open_time,
+            close_offset_minutes=get_int(
+                "run_door", "close_offset_minutes", run_defaults.close_offset_minutes
+            ),
+            state_file=get_path(
+                "run_door", "state_file", state_file.parent / "run_door_state.json"
+            ),
+        )
+
     return DoorConfig(
         latitude=get_float("location", "latitude", defaults.latitude),
         longitude=get_float("location", "longitude", defaults.longitude),
@@ -222,7 +270,8 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> DoorConfig:
             "runtime", "invalid_time_retry_seconds", defaults.invalid_time_retry_seconds
         ),
         max_sleep_seconds=get_float("runtime", "max_sleep_seconds", defaults.max_sleep_seconds),
-        state_file=get_path("runtime", "state_file", defaults.state_file),
+        state_file=state_file,
+        run_door=run_door,
     )
 
 
