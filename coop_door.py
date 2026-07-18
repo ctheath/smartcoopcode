@@ -140,34 +140,79 @@ def calculate_schedule(
     return DailySchedule(open_at=open_at, close_at=close_at)
 
 
+ScheduleForDay = Callable[[date], DailySchedule]
+
+
+def _desired_event(
+    now: datetime,
+    tz: ZoneInfo,
+    schedule_for_day: ScheduleForDay,
+    key_prefix: str = "",
+) -> DesiredEvent:
+    now = now.astimezone(tz)
+    today = schedule_for_day(now.date())
+
+    if today.open_at <= now < today.close_at:
+        return DesiredEvent(
+            target_state=STATE_OPEN,
+            key=_event_key(STATE_OPEN, today.open_at, key_prefix),
+            next_change_at=today.close_at,
+        )
+
+    if now < today.open_at:
+        yesterday = schedule_for_day(now.date() - timedelta(days=1))
+        return DesiredEvent(
+            target_state=STATE_CLOSED,
+            key=_event_key(STATE_CLOSED, yesterday.close_at, key_prefix),
+            next_change_at=today.open_at,
+        )
+
+    tomorrow = schedule_for_day(now.date() + timedelta(days=1))
+    return DesiredEvent(
+        target_state=STATE_CLOSED,
+        key=_event_key(STATE_CLOSED, today.close_at, key_prefix),
+        next_change_at=tomorrow.open_at,
+    )
+
+
 def desired_event_for_now(
     now: datetime,
     config: DoorConfig,
     sun_provider: SunProvider = astral_sun_provider,
 ) -> DesiredEvent:
-    now = now.astimezone(config.tz)
-    today = calculate_schedule(now.date(), config, sun_provider)
+    return _desired_event(
+        now,
+        config.tz,
+        lambda day: calculate_schedule(day, config, sun_provider),
+    )
 
-    if today.open_at <= now < today.close_at:
-        return DesiredEvent(
-            target_state=STATE_OPEN,
-            key=_event_key(STATE_OPEN, today.open_at),
-            next_change_at=today.close_at,
-        )
 
-    if now < today.open_at:
-        yesterday = calculate_schedule(now.date() - timedelta(days=1), config, sun_provider)
-        return DesiredEvent(
-            target_state=STATE_CLOSED,
-            key=_event_key(STATE_CLOSED, yesterday.close_at),
-            next_change_at=today.open_at,
-        )
+def run_calculate_schedule(
+    day: date,
+    config: DoorConfig,
+    sun_provider: SunProvider = astral_sun_provider,
+) -> DailySchedule:
+    if config.run_door is None:
+        raise ValueError("run_door configuration is required for the run door schedule")
+    sun_times = sun_provider(config, day)
+    open_floor = datetime.combine(day, config.run_door.open_time, tzinfo=config.tz)
+    open_at = max(sun_times["sunrise"], open_floor)
+    close_at = sun_times["sunset"] + timedelta(
+        minutes=config.run_door.close_offset_minutes
+    )
+    return DailySchedule(open_at=open_at, close_at=close_at)
 
-    tomorrow = calculate_schedule(now.date() + timedelta(days=1), config, sun_provider)
-    return DesiredEvent(
-        target_state=STATE_CLOSED,
-        key=_event_key(STATE_CLOSED, today.close_at),
-        next_change_at=tomorrow.open_at,
+
+def run_desired_event_for_now(
+    now: datetime,
+    config: DoorConfig,
+    sun_provider: SunProvider = astral_sun_provider,
+) -> DesiredEvent:
+    return _desired_event(
+        now,
+        config.tz,
+        lambda day: run_calculate_schedule(day, config, sun_provider),
+        key_prefix="run:",
     )
 
 
@@ -630,8 +675,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     return 2
 
 
-def _event_key(target_state: str, event_time: datetime) -> str:
-    return f"{target_state}:{event_time.isoformat()}"
+def _event_key(target_state: str, event_time: datetime, prefix: str = "") -> str:
+    return f"{prefix}{target_state}:{event_time.isoformat()}"
 
 
 if __name__ == "__main__":

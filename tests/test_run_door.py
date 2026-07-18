@@ -1,9 +1,36 @@
 import tempfile
 import unittest
-from datetime import time as dt_time
+from datetime import date, datetime, time as dt_time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import coop_door
+
+
+DENVER = ZoneInfo("America/Denver")
+
+
+def summer_sun_provider(config, day):
+    return {
+        "sunrise": datetime(day.year, day.month, day.day, 5, 30, tzinfo=config.tz),
+        "sunset": datetime(day.year, day.month, day.day, 20, 30, tzinfo=config.tz),
+    }
+
+
+def winter_sun_provider(config, day):
+    return {
+        "sunrise": datetime(day.year, day.month, day.day, 7, 22, tzinfo=config.tz),
+        "sunset": datetime(day.year, day.month, day.day, 16, 45, tzinfo=config.tz),
+    }
+
+
+def make_run_config(**run_overrides):
+    return coop_door.DoorConfig(
+        latitude=40.0,
+        longitude=-105.0,
+        timezone="America/Denver",
+        run_door=coop_door.RunDoorConfig(**run_overrides),
+    )
 
 
 class RunDoorConfigTests(unittest.TestCase):
@@ -96,6 +123,57 @@ class RunDoorConfigTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 coop_door.load_config(path)
+
+
+class RunDoorScheduleTests(unittest.TestCase):
+    def test_summer_open_floors_at_seven_am(self):
+        schedule = coop_door.run_calculate_schedule(
+            date(2026, 6, 21), make_run_config(), sun_provider=summer_sun_provider
+        )
+
+        self.assertEqual(datetime(2026, 6, 21, 7, 0, tzinfo=DENVER), schedule.open_at)
+        self.assertEqual(datetime(2026, 6, 21, 21, 5, tzinfo=DENVER), schedule.close_at)
+
+    def test_winter_open_waits_for_sunrise(self):
+        schedule = coop_door.run_calculate_schedule(
+            date(2026, 12, 21), make_run_config(), sun_provider=winter_sun_provider
+        )
+
+        self.assertEqual(datetime(2026, 12, 21, 7, 22, tzinfo=DENVER), schedule.open_at)
+        self.assertEqual(datetime(2026, 12, 21, 17, 20, tzinfo=DENVER), schedule.close_at)
+
+    def test_run_desired_event_open_midday_with_prefixed_key(self):
+        event = coop_door.run_desired_event_for_now(
+            datetime(2026, 6, 21, 12, 0, tzinfo=DENVER),
+            make_run_config(),
+            sun_provider=summer_sun_provider,
+        )
+
+        self.assertEqual(coop_door.STATE_OPEN, event.target_state)
+        self.assertEqual("run:open:2026-06-21T07:00:00-06:00", event.key)
+        self.assertEqual(datetime(2026, 6, 21, 21, 5, tzinfo=DENVER), event.next_change_at)
+
+    def test_run_desired_event_before_open_uses_yesterdays_close_key(self):
+        event = coop_door.run_desired_event_for_now(
+            datetime(2026, 6, 21, 4, 0, tzinfo=DENVER),
+            make_run_config(),
+            sun_provider=summer_sun_provider,
+        )
+
+        self.assertEqual(coop_door.STATE_CLOSED, event.target_state)
+        self.assertEqual("run:closed:2026-06-20T21:05:00-06:00", event.key)
+        self.assertEqual(datetime(2026, 6, 21, 7, 0, tzinfo=DENVER), event.next_change_at)
+
+    def test_run_desired_event_closed_at_night(self):
+        event = coop_door.run_desired_event_for_now(
+            datetime(2026, 6, 21, 22, 0, tzinfo=DENVER),
+            make_run_config(),
+            sun_provider=summer_sun_provider,
+        )
+
+        self.assertEqual(coop_door.STATE_CLOSED, event.target_state)
+        self.assertEqual("run:closed:2026-06-21T21:05:00-06:00", event.key)
+        self.assertEqual(datetime(2026, 6, 22, 7, 0, tzinfo=DENVER), event.next_change_at)
 
 
 if __name__ == "__main__":
