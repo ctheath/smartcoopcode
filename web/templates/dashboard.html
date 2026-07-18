@@ -30,14 +30,30 @@
         </article>
       </section>
 
+      <section id="run-door-section" class="status-grid" aria-label="Run door status" hidden>
+        <article class="panel primary-status">
+          <span class="label">Run Door Position</span>
+          <strong id="run-position">Unknown</strong>
+          <span id="run-busy" class="hint"></span>
+        </article>
+        <article class="panel">
+          <span class="label">Run Schedule Now</span>
+          <strong id="run-desired">Unknown</strong>
+          <span id="run-next-change" class="hint">Next scheduled change unknown</span>
+          <span id="run-manual-override" class="hint"></span>
+        </article>
+      </section>
+
       <section class="panel actions" aria-label="Manual controls">
         <div>
           <span class="label">Manual Control</span>
           <p id="command-result" class="hint">Commands move the door now and hold until the next scheduled change.</p>
         </div>
         <div class="button-row">
-          <button id="open-button" type="button" data-action="open">Open</button>
-          <button id="close-button" type="button" data-action="closed">Close</button>
+          <button id="open-button" type="button" data-action="open" data-door="coop">Open Coop</button>
+          <button id="close-button" type="button" data-action="closed" data-door="coop">Close Coop</button>
+          <button id="run-open-button" type="button" data-action="open" data-door="run" hidden>Open Run</button>
+          <button id="run-close-button" type="button" data-action="closed" data-door="run" hidden>Close Run</button>
         </div>
       </section>
 

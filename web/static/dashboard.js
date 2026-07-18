@@ -12,6 +12,12 @@ const elements = {
   errors: document.querySelector("#errors"),
   errorsPanel: document.querySelector(".errors"),
   updated: document.querySelector("#updated"),
+  runSection: document.querySelector("#run-door-section"),
+  runPosition: document.querySelector("#run-position"),
+  runBusy: document.querySelector("#run-busy"),
+  runDesired: document.querySelector("#run-desired"),
+  runNextChange: document.querySelector("#run-next-change"),
+  runManualOverride: document.querySelector("#run-manual-override"),
   buttons: Array.from(document.querySelectorAll("button[data-action]")),
 };
 
@@ -78,6 +84,8 @@ function renderStatus(status) {
     second: "2-digit",
   })}`;
 
+  renderRunDoor(status);
+
   const errors = status.errors || [];
   elements.errors.replaceChildren();
   elements.errorsPanel.classList.toggle("has-errors", errors.length > 0);
@@ -95,6 +103,34 @@ function renderStatus(status) {
   }
 }
 
+function renderRunDoor(status) {
+  const run = status.run_door;
+  const runButtons = elements.buttons.filter((button) => button.dataset.door === "run");
+  const configured = Boolean(run);
+
+  elements.runSection.hidden = !configured;
+  runButtons.forEach((button) => {
+    button.hidden = !configured;
+  });
+  if (!configured) {
+    return;
+  }
+
+  const position = run.position
+    ? titleCase(run.position)
+    : run.desired_state === "open"
+      ? "Open (assumed)"
+      : "Unknown";
+  elements.runPosition.textContent = position;
+  elements.runBusy.textContent = status.busy ? "Door is moving" : "Idle";
+  elements.runDesired.textContent = titleCase(run.desired_state);
+  elements.runNextChange.textContent = formatNextChange(
+    run.next_scheduled_action,
+    run.next_change_at
+  );
+  elements.runManualOverride.textContent = formatManualOverride(run.manual_override);
+}
+
 async function refreshStatus() {
   try {
     const response = await fetch("/api/status", { headers: { Accept: "application/json" } });
@@ -110,8 +146,9 @@ async function refreshStatus() {
   }
 }
 
-async function runCommand(action) {
-  const confirmed = window.confirm(`Move the coop door ${action} now?`);
+async function runCommand(action, door) {
+  const doorName = door === "run" ? "run" : "coop";
+  const confirmed = window.confirm(`Move the ${doorName} door ${action} now?`);
   if (!confirmed) {
     return;
   }
@@ -128,7 +165,7 @@ async function runCommand(action) {
         "Content-Type": "application/json",
         "X-CSRF-Token": csrfToken,
       },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, door: doorName }),
     });
     const payload = await response.json();
     if (!response.ok) {
@@ -150,7 +187,7 @@ async function runCommand(action) {
 }
 
 elements.buttons.forEach((button) => {
-  button.addEventListener("click", () => runCommand(button.dataset.action));
+  button.addEventListener("click", () => runCommand(button.dataset.action, button.dataset.door));
 });
 
 refreshStatus();

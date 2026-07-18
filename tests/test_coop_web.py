@@ -466,6 +466,14 @@ class RunDoorWebTests(unittest.TestCase):
             self.assertTrue(run_controller.stopped)
             self.assertTrue(runtime.controller.cleaned_up)
 
+    def test_dashboard_includes_hidden_run_door_card_and_buttons(self):
+        template = Path("web/templates/dashboard.html").read_text(encoding="utf-8")
+
+        self.assertIn('id="run-door-section"', template)
+        self.assertIn('data-door="run"', template)
+        self.assertIn('data-door="coop"', template)
+        self.assertIn("Run Door", template)
+
 
 if __name__ == "__main__":
     unittest.main()
