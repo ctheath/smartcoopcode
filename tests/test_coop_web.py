@@ -474,6 +474,9 @@ class RunDoorWebTests(unittest.TestCase):
         self.assertIn('data-door="coop"', template)
         self.assertIn("Run Door", template)
 
+        css = Path("web/static/dashboard.css").read_text(encoding="utf-8")
+        self.assertIn("[hidden]", css)
+
 
 if __name__ == "__main__":
     unittest.main()
