@@ -82,9 +82,12 @@ class MovementResult:
     verified: bool
     timed_out: bool
     already_in_position: bool
+    contradiction: bool = False
 
     @property
     def position_status(self) -> str:
+        if self.contradiction:
+            return "reed_contradiction"
         if self.verified:
             return self.target_state
         return "position_unverified"
@@ -378,6 +381,7 @@ class StateStore:
             "position_status": result.position_status,
             "verified": result.verified,
             "timed_out": result.timed_out,
+            "contradiction": result.contradiction,
             "already_in_position": result.already_in_position,
             "attempted_at": attempted_at.isoformat(),
         }

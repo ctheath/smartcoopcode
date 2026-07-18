@@ -245,6 +245,37 @@ class CoopDoorMotorTests(unittest.TestCase):
         self.assertEqual([], gpio.outputs)
 
 
+class MovementResultStatusTests(unittest.TestCase):
+    def test_position_status_prefers_contradiction_over_other_flags(self):
+        result = coop_door.MovementResult(
+            target_state=coop_door.STATE_OPEN,
+            verified=False,
+            timed_out=False,
+            already_in_position=False,
+            contradiction=True,
+        )
+
+        self.assertEqual("reed_contradiction", result.position_status)
+
+    def test_position_status_unchanged_for_existing_shapes(self):
+        verified = coop_door.MovementResult(
+            target_state=coop_door.STATE_OPEN,
+            verified=True,
+            timed_out=False,
+            already_in_position=False,
+        )
+        unverified = coop_door.MovementResult(
+            target_state=coop_door.STATE_CLOSED,
+            verified=False,
+            timed_out=True,
+            already_in_position=False,
+        )
+
+        self.assertEqual("open", verified.position_status)
+        self.assertEqual("position_unverified", unverified.position_status)
+        self.assertFalse(verified.contradiction)
+
+
 class CoopDoorStateTests(unittest.TestCase):
     def test_state_store_remembers_attempted_event_to_avoid_retry_thrash(self):
         with tempfile.TemporaryDirectory() as tmp:
