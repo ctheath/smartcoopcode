@@ -244,9 +244,11 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> DoorConfig:
                 "run_door", "close_offset_minutes", run_defaults.close_offset_minutes
             ),
             state_file=get_path(
-                "run_door", "state_file", state_file.parent / "run_door_state.json"
+                "run_door", "state_file", state_file.parent / run_defaults.state_file.name
             ),
         )
+        if run_door.travel_seconds <= 0:
+            raise ValueError("run_door.travel_seconds must be greater than 0")
 
     return DoorConfig(
         latitude=get_float("location", "latitude", defaults.latitude),

@@ -89,6 +89,14 @@ class RunDoorConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 coop_door.load_config(path)
 
+    def test_non_positive_travel_seconds_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "coop_door.ini"
+            path.write_text("[run_door]\ntravel_seconds = 0\n", encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                coop_door.load_config(path)
+
 
 if __name__ == "__main__":
     unittest.main()
