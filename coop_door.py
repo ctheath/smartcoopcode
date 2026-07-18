@@ -455,6 +455,113 @@ class DoorController:
         return GPIO
 
 
+class ActuatorController:
+    """Timed drive for the run door linear actuator.
+
+    The actuator's internal limit switches physically stop it at both ends of
+    travel, so movement is a fixed-duration drive rather than sensor-terminated.
+    A reed switch verifies the closed position; open is trusted to the limit
+    switch and deliberately unsensed.
+    """
+
+    def __init__(
+        self,
+        config: DoorConfig,
+        gpio_module=None,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+        logger: Optional[logging.Logger] = None,
+    ):
+        if config.run_door is None:
+            raise ValueError("run_door configuration is required for ActuatorController")
+        self.config = config
+        self.run_config = config.run_door
+        self.gpio = gpio_module or DoorController._load_gpio()
+        self.sleep = sleep
+        self.monotonic = monotonic
+        self.logger = logger or logging.getLogger(__name__)
+        self._setup_gpio()
+
+    def current_position(self) -> Optional[str]:
+        if self.gpio.input(self.run_config.reed_closed_pin) == self.gpio.LOW:
+            return STATE_CLOSED
+        return None
+
+    def move_to(self, target_state: str) -> MovementResult:
+        if target_state not in {STATE_OPEN, STATE_CLOSED}:
+            raise ValueError(f"Unsupported target_state: {target_state}")
+
+        if target_state == STATE_CLOSED and self.current_position() == STATE_CLOSED:
+            self.logger.info("Run door already closed; not running actuator")
+            return MovementResult(
+                target_state=target_state,
+                verified=True,
+                timed_out=False,
+                already_in_position=True,
+            )
+
+        self._drive_motor(target_state)
+        deadline = self.monotonic() + self.run_config.travel_seconds
+        while self.monotonic() < deadline:
+            self.sleep(self.config.motor_poll_seconds)
+        self.stop_motor(target_state)
+
+        reed_closed = self.gpio.input(self.run_config.reed_closed_pin) == self.gpio.LOW
+        if target_state == STATE_CLOSED:
+            verified = reed_closed
+            contradiction = False
+            if verified:
+                self.logger.info("Run door reached verified closed position")
+            else:
+                self.logger.error(
+                    "Run door close finished without reed confirmation; position_unverified"
+                )
+        else:
+            contradiction = reed_closed
+            verified = not contradiction
+            if contradiction:
+                self.logger.error(
+                    "Run door reed still reads closed after open; reed_contradiction"
+                )
+            else:
+                self.logger.info("Run door open drive complete (limit switch assumed)")
+
+        return MovementResult(
+            target_state=target_state,
+            verified=verified,
+            timed_out=False,
+            already_in_position=False,
+            contradiction=contradiction,
+        )
+
+    def stop_motor(self, target_state: Optional[str] = None) -> None:
+        self.gpio.output(self.run_config.in1_pin, self.gpio.LOW)
+        self.gpio.output(self.run_config.in2_pin, self.gpio.LOW)
+
+    def cleanup(self) -> None:
+        self.stop_motor()
+        self.gpio.cleanup()
+
+    def _setup_gpio(self) -> None:
+        self.gpio.setmode(self.gpio.BCM)
+        self.gpio.setup([self.run_config.in1_pin, self.run_config.in2_pin], self.gpio.OUT)
+        self.gpio.setup(
+            self.run_config.reed_closed_pin,
+            self.gpio.IN,
+            pull_up_down=self.gpio.PUD_UP,
+        )
+
+    def _drive_motor(self, target_state: str) -> None:
+        if target_state == STATE_OPEN:
+            self.logger.info("Opening run door (extend)")
+            self.gpio.output(self.run_config.in1_pin, self.gpio.HIGH)
+            self.gpio.output(self.run_config.in2_pin, self.gpio.LOW)
+            return
+        self.logger.info("Closing run door (retract)")
+        self.gpio.output(self.run_config.in1_pin, self.gpio.LOW)
+        self.gpio.output(self.run_config.in2_pin, self.gpio.HIGH)
+
+
 class StateStore:
     def __init__(self, path: Path):
         self.path = path

@@ -1,3 +1,4 @@
+import logging
 import tempfile
 import unittest
 from datetime import date, datetime, time as dt_time, timedelta
@@ -5,6 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import coop_door
+from tests.test_coop_door import FakeClock, FakeGPIO
 
 
 DENVER = ZoneInfo("America/Denver")
@@ -197,6 +199,124 @@ class RunDoorScheduleTests(unittest.TestCase):
 
         self.assertEqual(coop_door.STATE_OPEN, open_instant.target_state)
         self.assertEqual(coop_door.STATE_CLOSED, close_instant.target_state)
+
+
+class ActuatorControllerTests(unittest.TestCase):
+    def make_controller(self, gpio, clock=None, **run_overrides):
+        run_values = {"travel_seconds": 0.3}
+        run_values.update(run_overrides)
+        config = coop_door.DoorConfig(
+            motor_poll_seconds=0.1,
+            run_door=coop_door.RunDoorConfig(**run_values),
+        )
+        clock = clock or FakeClock()
+        logger = logging.getLogger("tests.run_door")
+        logger.addHandler(logging.NullHandler())
+        logger.propagate = False
+        return coop_door.ActuatorController(
+            config,
+            gpio_module=gpio,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+            logger=logger,
+        )
+
+    def test_requires_run_door_config(self):
+        with self.assertRaises(ValueError):
+            coop_door.ActuatorController(coop_door.DoorConfig(), gpio_module=FakeGPIO())
+
+    def test_setup_configures_direction_pins_and_reed_pullup(self):
+        gpio = FakeGPIO()
+
+        self.make_controller(gpio)
+
+        self.assertIn((coop_door.DEFAULT_RUN_IN1_PIN, gpio.OUT, None), gpio.setups)
+        self.assertIn((coop_door.DEFAULT_RUN_IN2_PIN, gpio.OUT, None), gpio.setups)
+        self.assertIn(
+            (coop_door.DEFAULT_RUN_REED_CLOSED_PIN, gpio.IN, gpio.PUD_UP), gpio.setups
+        )
+
+    def test_open_drives_extend_for_travel_time_then_coasts(self):
+        gpio = FakeGPIO()
+        clock = FakeClock()
+        controller = self.make_controller(gpio, clock)
+
+        result = controller.move_to(coop_door.STATE_OPEN)
+
+        self.assertTrue(result.verified)
+        self.assertFalse(result.timed_out)
+        self.assertFalse(result.contradiction)
+        self.assertEqual("open", result.position_status)
+        self.assertEqual(
+            (coop_door.DEFAULT_RUN_IN1_PIN, gpio.HIGH), gpio.outputs[0]
+        )
+        self.assertEqual((coop_door.DEFAULT_RUN_IN2_PIN, gpio.LOW), gpio.outputs[1])
+        self.assertEqual((coop_door.DEFAULT_RUN_IN2_PIN, gpio.LOW), gpio.outputs[-1])
+        self.assertEqual((coop_door.DEFAULT_RUN_IN1_PIN, gpio.LOW), gpio.outputs[-2])
+        self.assertAlmostEqual(0.3, sum(clock.sleeps), places=6)
+
+    def test_close_verifies_with_reed_low(self):
+        gpio = FakeGPIO()
+        controller = self.make_controller(gpio)
+        gpio.inputs[coop_door.DEFAULT_RUN_REED_CLOSED_PIN] = gpio.HIGH
+
+        def trip_reed(seconds):
+            gpio.inputs[coop_door.DEFAULT_RUN_REED_CLOSED_PIN] = gpio.LOW
+
+        original_sleep = controller.sleep
+
+        def sleeping(seconds):
+            original_sleep(seconds)
+            trip_reed(seconds)
+
+        controller.sleep = sleeping
+
+        result = controller.move_to(coop_door.STATE_CLOSED)
+
+        self.assertTrue(result.verified)
+        self.assertEqual("closed", result.position_status)
+        self.assertEqual((coop_door.DEFAULT_RUN_IN1_PIN, gpio.LOW), gpio.outputs[0])
+        self.assertEqual((coop_door.DEFAULT_RUN_IN2_PIN, gpio.HIGH), gpio.outputs[1])
+
+    def test_close_without_reed_confirmation_is_unverified(self):
+        gpio = FakeGPIO()
+        controller = self.make_controller(gpio)
+
+        result = controller.move_to(coop_door.STATE_CLOSED)
+
+        self.assertFalse(result.verified)
+        self.assertFalse(result.timed_out)
+        self.assertEqual("position_unverified", result.position_status)
+
+    def test_close_when_already_closed_skips_motor(self):
+        gpio = FakeGPIO()
+        gpio.inputs[coop_door.DEFAULT_RUN_REED_CLOSED_PIN] = gpio.LOW
+        controller = self.make_controller(gpio)
+
+        result = controller.move_to(coop_door.STATE_CLOSED)
+
+        self.assertTrue(result.verified)
+        self.assertTrue(result.already_in_position)
+        self.assertEqual([], gpio.outputs)
+
+    def test_open_with_reed_still_closed_reports_contradiction(self):
+        gpio = FakeGPIO()
+        gpio.inputs[coop_door.DEFAULT_RUN_REED_CLOSED_PIN] = gpio.LOW
+        controller = self.make_controller(gpio)
+
+        result = controller.move_to(coop_door.STATE_OPEN)
+
+        self.assertFalse(result.verified)
+        self.assertTrue(result.contradiction)
+        self.assertEqual("reed_contradiction", result.position_status)
+
+    def test_current_position_is_closed_or_unknown(self):
+        gpio = FakeGPIO()
+        controller = self.make_controller(gpio)
+
+        self.assertIsNone(controller.current_position())
+        gpio.inputs[coop_door.DEFAULT_RUN_REED_CLOSED_PIN] = gpio.LOW
+        self.assertEqual(coop_door.STATE_CLOSED, controller.current_position())
 
 
 if __name__ == "__main__":
