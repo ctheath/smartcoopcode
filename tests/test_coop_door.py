@@ -332,13 +332,13 @@ class CoopDoorStateTests(unittest.TestCase):
             store = coop_door.StateStore(config.state_file)
             store.record_manual_override(
                 target_state=coop_door.STATE_CLOSED,
-                override_until=datetime(2026, 4, 25, 19, 0, tzinfo=DENVER),
+                override_until=datetime(2026, 4, 25, 18, 30, tzinfo=DENVER),
                 set_at=datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
             )
             controller = RecordingDoorController(coop_door.STATE_OPEN)
 
             coop_door.reconcile_once(
-                datetime(2026, 4, 25, 19, 1, tzinfo=DENVER),
+                datetime(2026, 4, 25, 18, 31, tzinfo=DENVER),
                 config,
                 controller,
                 store,
@@ -347,7 +347,7 @@ class CoopDoorStateTests(unittest.TestCase):
 
             self.assertEqual([coop_door.STATE_CLOSED], controller.moves)
             self.assertIsNone(
-                store.active_manual_override(datetime(2026, 4, 25, 19, 1, tzinfo=DENVER))
+                store.active_manual_override(datetime(2026, 4, 25, 18, 31, tzinfo=DENVER))
             )
 
 

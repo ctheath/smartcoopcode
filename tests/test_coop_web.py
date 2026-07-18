@@ -29,7 +29,7 @@ class FakeRuntime:
         self.status_payload = {
             "position": "open",
             "desired_state": "open",
-            "next_change_at": "2026-04-25T19:00:00-06:00",
+            "next_change_at": "2026-04-25T18:30:00-06:00",
             "busy": False,
             "last_attempt": None,
             "errors": [],

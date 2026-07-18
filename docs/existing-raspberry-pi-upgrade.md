@@ -107,8 +107,8 @@ longitude = YOUR_LONGITUDE_HERE
 timezone = America/Denver
 
 [schedule]
-open_offset_minutes = -30
-close_offset_minutes = 60
+open_offset_minutes = 0
+close_offset_minutes = 30
 
 [hardware]
 in1_pin = 17
