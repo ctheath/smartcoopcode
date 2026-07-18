@@ -296,6 +296,25 @@ class CoopDoorStateTests(unittest.TestCase):
 
             self.assertTrue(store.was_attempted("open:2026-04-25T06:30:00-06:00"))
 
+    def test_record_attempt_persists_contradiction_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            store = coop_door.StateStore(path)
+
+            store.record_attempt(
+                "run:open:2026-04-25T07:00:00-06:00",
+                coop_door.MovementResult(
+                    target_state=coop_door.STATE_OPEN,
+                    verified=False,
+                    timed_out=False,
+                    already_in_position=False,
+                    contradiction=True,
+                ),
+                datetime(2026, 4, 25, 7, 0, tzinfo=DENVER),
+            )
+
+            self.assertIs(True, store.read()["last_attempt"]["contradiction"])
+
     def test_manual_close_during_day_prevents_reopen_until_evening_close(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = coop_door.DoorConfig(
