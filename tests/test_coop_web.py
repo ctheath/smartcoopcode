@@ -167,7 +167,7 @@ class CoopWebRuntimeTests(unittest.TestCase):
 
             self.assertIsNone(status["position"])
             self.assertEqual("open", status["desired_state"])
-            self.assertEqual("2026-04-25T19:00:00-06:00", status["next_change_at"])
+            self.assertEqual("2026-04-25T18:30:00-06:00", status["next_change_at"])
             self.assertFalse(status["busy"])
             self.assertEqual("manual", status["last_attempt"]["source"])
             self.assertIn("unknown_position", status["errors"])
@@ -231,7 +231,7 @@ class CoopWebRuntimeTests(unittest.TestCase):
 
             override = store.active_manual_override(datetime(2026, 4, 25, 12, 1, tzinfo=DENVER))
             self.assertEqual("closed", override["target_state"])
-            self.assertEqual("2026-04-25T19:00:00-06:00", override["until"])
+            self.assertEqual("2026-04-25T18:30:00-06:00", override["until"])
 
     def test_runtime_status_includes_clear_schedule_fields_and_active_override(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -240,7 +240,7 @@ class CoopWebRuntimeTests(unittest.TestCase):
             store = coop_door.StateStore(state_file)
             store.record_manual_override(
                 target_state=coop_door.STATE_CLOSED,
-                override_until=datetime(2026, 4, 25, 19, 0, tzinfo=DENVER),
+                override_until=datetime(2026, 4, 25, 18, 30, tzinfo=DENVER),
                 set_at=datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
             )
             runtime = coop_web.CoopWebRuntime(
@@ -255,9 +255,9 @@ class CoopWebRuntimeTests(unittest.TestCase):
 
             self.assertEqual("open", status["scheduled_state_now"])
             self.assertEqual("closed", status["next_scheduled_action"])
-            self.assertEqual("2026-04-25T19:00:00-06:00", status["next_change_at"])
+            self.assertEqual("2026-04-25T18:30:00-06:00", status["next_change_at"])
             self.assertEqual("closed", status["manual_override"]["target_state"])
-            self.assertEqual("2026-04-25T19:00:00-06:00", status["manual_override"]["until"])
+            self.assertEqual("2026-04-25T18:30:00-06:00", status["manual_override"]["until"])
 
     def test_dashboard_uses_schedule_now_and_next_wording(self):
         template = Path("web/templates/dashboard.html").read_text(encoding="utf-8")

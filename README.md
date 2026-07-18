@@ -1,6 +1,6 @@
 # Smart Coop Door
 
-This Raspberry Pi controller opens the coop door 30 minutes before sunrise and closes it 60 minutes after sunset. Sunrise and sunset are calculated locally with `astral`, so normal operation does not depend on Wi-Fi or a weather API.
+This Raspberry Pi controller opens the coop door at sunrise and closes it 30 minutes after sunset. Sunrise and sunset are calculated locally with `astral`, so normal operation does not depend on Wi-Fi or a weather API.
 
 ## Install
 

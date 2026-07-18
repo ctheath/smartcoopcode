@@ -153,6 +153,12 @@ class CoopDoorScheduleTests(unittest.TestCase):
         self.assertFalse(coop_door.is_time_valid(datetime(1970, 1, 1, tzinfo=DENVER), config))
         self.assertTrue(coop_door.is_time_valid(datetime(2026, 4, 25, tzinfo=DENVER), config))
 
+    def test_default_offsets_are_exact_sunrise_and_sunset_plus_thirty(self):
+        config = coop_door.DoorConfig()
+
+        self.assertEqual(0, config.open_offset_minutes)
+        self.assertEqual(30, config.close_offset_minutes)
+
 
 class CoopDoorMotorTests(unittest.TestCase):
     def make_controller(self, gpio, clock=None, **overrides):
@@ -270,7 +276,7 @@ class CoopDoorStateTests(unittest.TestCase):
             store = coop_door.StateStore(config.state_file)
             store.record_manual_override(
                 target_state=coop_door.STATE_CLOSED,
-                override_until=datetime(2026, 4, 25, 19, 0, tzinfo=DENVER),
+                override_until=datetime(2026, 4, 25, 18, 30, tzinfo=DENVER),
                 set_at=datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
             )
             controller = RecordingDoorController(coop_door.STATE_CLOSED)
@@ -284,7 +290,7 @@ class CoopDoorStateTests(unittest.TestCase):
             )
 
             self.assertEqual(coop_door.STATE_OPEN, event.target_state)
-            self.assertEqual(datetime(2026, 4, 25, 19, 0, tzinfo=DENVER), event.next_change_at)
+            self.assertEqual(datetime(2026, 4, 25, 18, 30, tzinfo=DENVER), event.next_change_at)
             self.assertEqual([], controller.moves)
 
     def test_manual_open_at_night_prevents_close_until_morning_open(self):
@@ -298,7 +304,7 @@ class CoopDoorStateTests(unittest.TestCase):
             store = coop_door.StateStore(config.state_file)
             store.record_manual_override(
                 target_state=coop_door.STATE_OPEN,
-                override_until=datetime(2026, 4, 26, 6, 30, tzinfo=DENVER),
+                override_until=datetime(2026, 4, 26, 7, 0, tzinfo=DENVER),
                 set_at=datetime(2026, 4, 25, 21, 0, tzinfo=DENVER),
             )
             controller = RecordingDoorController(coop_door.STATE_OPEN)
@@ -312,7 +318,7 @@ class CoopDoorStateTests(unittest.TestCase):
             )
 
             self.assertEqual(coop_door.STATE_CLOSED, event.target_state)
-            self.assertEqual(datetime(2026, 4, 26, 6, 30, tzinfo=DENVER), event.next_change_at)
+            self.assertEqual(datetime(2026, 4, 26, 7, 0, tzinfo=DENVER), event.next_change_at)
             self.assertEqual([], controller.moves)
 
     def test_manual_override_expires_at_next_schedule_boundary(self):

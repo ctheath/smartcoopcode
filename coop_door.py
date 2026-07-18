@@ -42,8 +42,8 @@ class DoorConfig:
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     timezone: str = "America/Denver"
-    open_offset_minutes: int = -30
-    close_offset_minutes: int = 60
+    open_offset_minutes: int = 0
+    close_offset_minutes: int = 30
     in1_pin: int = DEFAULT_IN1_PIN
     in2_pin: int = DEFAULT_IN2_PIN
     reed_open_pin: int = DEFAULT_REED_OPEN_PIN
