@@ -6,7 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import coop_door
-from tests.test_coop_door import FakeClock, FakeGPIO
+from tests.test_coop_door import FakeClock, FakeGPIO, RecordingDoorController, fixed_sun_provider
 
 
 DENVER = ZoneInfo("America/Denver")
@@ -341,6 +341,92 @@ class ActuatorControllerTests(unittest.TestCase):
             ],
             gpio.cleaned_channels,
         )
+
+
+class ReconcileAllTests(unittest.TestCase):
+    def make_config(self, tmp):
+        return coop_door.DoorConfig(
+            latitude=40.0,
+            longitude=-105.0,
+            timezone="America/Denver",
+            state_file=Path(tmp) / "state.json",
+            run_door=coop_door.RunDoorConfig(state_file=Path(tmp) / "run_state.json"),
+        )
+
+    def make_doors(self, config, coop_position, run_position):
+        coop_controller = RecordingDoorController(coop_position)
+        run_controller = RecordingDoorController(run_position)
+        doors = [
+            (
+                coop_controller,
+                coop_door.StateStore(config.state_file),
+                coop_door.desired_event_for_now,
+            ),
+            (
+                run_controller,
+                coop_door.StateStore(config.run_door.state_file),
+                coop_door.run_desired_event_for_now,
+            ),
+        ]
+        return doors, coop_controller, run_controller
+
+    def test_moves_both_doors_toward_desired_state_and_returns_nearest_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self.make_config(tmp)
+            doors, coop_controller, run_controller = self.make_doors(
+                config, coop_position=coop_door.STATE_CLOSED, run_position=None
+            )
+
+            next_change = coop_door.reconcile_all(
+                datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
+                config,
+                doors,
+                sun_provider=fixed_sun_provider,
+            )
+
+            self.assertEqual([coop_door.STATE_OPEN], coop_controller.moves)
+            self.assertEqual([coop_door.STATE_OPEN], run_controller.moves)
+            self.assertEqual(datetime(2026, 4, 25, 18, 30, tzinfo=DENVER), next_change)
+
+    def test_run_door_not_redriven_after_attempt_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self.make_config(tmp)
+            doors, _, run_controller = self.make_doors(
+                config, coop_position=coop_door.STATE_OPEN, run_position=None
+            )
+            now = datetime(2026, 4, 25, 12, 0, tzinfo=DENVER)
+
+            coop_door.reconcile_all(now, config, doors, sun_provider=fixed_sun_provider)
+            run_controller.position = None
+            coop_door.reconcile_all(
+                datetime(2026, 4, 25, 12, 5, tzinfo=DENVER),
+                config,
+                doors,
+                sun_provider=fixed_sun_provider,
+            )
+
+            self.assertEqual([coop_door.STATE_OPEN], run_controller.moves)
+
+    def test_run_door_manual_override_blocks_scheduled_correction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self.make_config(tmp)
+            run_store = coop_door.StateStore(config.run_door.state_file)
+            run_store.record_manual_override(
+                target_state=coop_door.STATE_CLOSED,
+                override_until=datetime(2026, 4, 25, 18, 35, tzinfo=DENVER),
+                set_at=datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
+            )
+            run_controller = RecordingDoorController(coop_door.STATE_CLOSED)
+            doors = [(run_controller, run_store, coop_door.run_desired_event_for_now)]
+
+            coop_door.reconcile_all(
+                datetime(2026, 4, 25, 12, 30, tzinfo=DENVER),
+                config,
+                doors,
+                sun_provider=fixed_sun_provider,
+            )
+
+            self.assertEqual([], run_controller.moves)
 
 
 if __name__ == "__main__":

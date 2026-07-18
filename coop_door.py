@@ -676,16 +676,14 @@ class StateStore:
             return {}
 
 
-def reconcile_once(
+def reconcile_door(
     now: datetime,
-    config: DoorConfig,
-    controller: DoorController,
+    event: DesiredEvent,
+    controller,
     state_store: StateStore,
-    sun_provider: SunProvider = astral_sun_provider,
     logger: Optional[logging.Logger] = None,
-) -> DesiredEvent:
+) -> None:
     logger = logger or logging.getLogger(__name__)
-    event = desired_event_for_now(now, config, sun_provider)
     current_position = controller.current_position()
 
     logger.info(
@@ -696,7 +694,7 @@ def reconcile_once(
     )
 
     if current_position == event.target_state:
-        return event
+        return
 
     manual_override = state_store.active_manual_override(now)
     if manual_override is not None:
@@ -706,24 +704,66 @@ def reconcile_once(
             manual_override["until"],
             event.target_state,
         )
-        return event
+        return
 
     if state_store.was_attempted(event.key):
         logger.warning(
             "Already attempted %s and position is still not verified; skipping retry",
             event.key,
         )
-        return event
+        return
 
     result = controller.move_to(event.target_state)
     state_store.record_attempt(event.key, result, now)
+
+
+def reconcile_once(
+    now: datetime,
+    config: DoorConfig,
+    controller: DoorController,
+    state_store: StateStore,
+    sun_provider: SunProvider = astral_sun_provider,
+    logger: Optional[logging.Logger] = None,
+) -> DesiredEvent:
+    event = desired_event_for_now(now, config, sun_provider)
+    reconcile_door(now, event, controller, state_store, logger)
     return event
+
+
+def reconcile_all(
+    now: datetime,
+    config: DoorConfig,
+    doors,
+    sun_provider: SunProvider = astral_sun_provider,
+    logger: Optional[logging.Logger] = None,
+) -> datetime:
+    """Reconcile every (controller, state_store, event_fn) door in sequence.
+
+    Sequential reconciliation is what guarantees the two motors never run
+    at the same time. Returns the nearest next_change_at across doors.
+    """
+    next_changes = []
+    for controller, state_store, event_fn in doors:
+        event = event_fn(now, config, sun_provider)
+        reconcile_door(now, event, controller, state_store, logger)
+        next_changes.append(event.next_change_at)
+    return min(next_changes)
 
 
 def run_forever(config: DoorConfig) -> None:
     logger = logging.getLogger(__name__)
-    state_store = StateStore(config.state_file)
     controller = DoorController(config, logger=logger)
+    doors = [(controller, StateStore(config.state_file), desired_event_for_now)]
+    run_controller = None
+    if config.run_door is not None:
+        run_controller = ActuatorController(config, logger=logger)
+        doors.append(
+            (
+                run_controller,
+                StateStore(config.run_door.state_file),
+                run_desired_event_for_now,
+            )
+        )
     try:
         while True:
             now = datetime.now(config.tz)
@@ -736,12 +776,14 @@ def run_forever(config: DoorConfig) -> None:
                 time.sleep(config.invalid_time_retry_seconds)
                 continue
 
-            event = reconcile_once(now, config, controller, state_store, logger=logger)
-            sleep_seconds = max(1.0, (event.next_change_at - now).total_seconds())
+            next_change = reconcile_all(now, config, doors, logger=logger)
+            sleep_seconds = max(1.0, (next_change - now).total_seconds())
             sleep_seconds = min(sleep_seconds, config.max_sleep_seconds)
             logger.info("Sleeping %.0f seconds before next check", sleep_seconds)
             time.sleep(sleep_seconds)
     finally:
+        if run_controller is not None:
+            run_controller.stop_motor()
         controller.cleanup()
 
 
