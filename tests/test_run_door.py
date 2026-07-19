@@ -543,6 +543,43 @@ class CliDoorRoutingTests(unittest.TestCase):
 
             self.assertEqual(2, ctx.exception.code)
 
+    def test_close_with_door_run_exits_one_when_unverified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lines = [
+                "[location]",
+                "latitude = 40.0",
+                "longitude = -105.0",
+                "[run_door]",
+                "travel_seconds = 0.05",
+            ]
+            path = Path(tmp) / "coop_door.ini"
+            path.write_text("\n".join(lines), encoding="utf-8")
+            gpio = FakeGPIO()
+
+            with patch.object(
+                coop_door.DoorController, "_load_gpio", staticmethod(lambda: gpio)
+            ):
+                exit_code = coop_door.main(
+                    ["--config", str(path), "close", "--door", "run"]
+                )
+
+            self.assertEqual(1, exit_code)
+
+    def test_open_defaults_to_coop_door_controller(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_config(tmp)
+            fake = FakeActuator()
+
+            with patch.object(
+                coop_door, "DoorController", return_value=fake
+            ) as door_cls, patch.object(coop_door, "ActuatorController") as actuator_cls:
+                exit_code = coop_door.main(["--config", str(path), "open"])
+
+            self.assertEqual(0, exit_code)
+            door_cls.assert_called_once()
+            actuator_cls.assert_not_called()
+            self.assertEqual([coop_door.STATE_OPEN], fake.moves)
+
 
 if __name__ == "__main__":
     unittest.main()
