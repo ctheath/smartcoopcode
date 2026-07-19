@@ -130,6 +130,10 @@ state_file = /var/lib/coop-door/state.json
 
 The hardware pins above match the original project defaults. If you have not changed the wiring, use those values.
 
+If you kept your existing `coop_door.ini`, update the `[schedule]` section to
+the new timing — set `open_offset_minutes = 0` and `close_offset_minutes = 30`.
+The old values (-30/60) will otherwise silently override the new defaults.
+
 ### 7. Test the door while watching it
 
 ```bash

@@ -22,15 +22,17 @@ limit switches, self-locking screw). Design spec:
   likely workable at this light load. If the Pi or driver browns out during
   bench tests, swap in a 12V/5A adapter.
 - Direction convention: IN3 HIGH + IN4 LOW extends the rod (opens the door).
-  If the first bench test drives the wrong way, swap the two actuator leads at
-  the OUT3/OUT4 screw terminals. Do not change code or config for direction.
+  If the first bench test drives the wrong way, unplug the 12V adapter, then
+  swap the two actuator leads at the OUT3/OUT4 screw terminals. Do not change
+  code or config for direction.
 - The actuator is rated 25% duty cycle. Scheduled use is ~2 minutes/day; avoid
   long back-to-back manual cycling while testing.
 
 ## Bench test (before mounting)
 
-Run these midday with the service stopped and the actuator NOT attached to the
-door:
+Complete the Wiring section — including the power pre-flight — before driving
+anything. Run these midday with the service stopped and the actuator NOT
+attached to the door:
 
 ```bash
 sudo systemctl stop coop-door.service
@@ -41,8 +43,11 @@ cd /home/chance/coophub
 .venv/bin/python coop_door.py --config coop_door.ini close --door run
 ```
 
-Expect: `status` prints `unknown` (reed not tripped), `open` extends the rod
-until the internal limit switch stops it (~55s), `close` retracts fully.
+Expect: `status` prints `unknown` (reed not tripped). `open` drives for a fixed
+~75s window: the rod reaches the internal limit switch at ~55s and the motor
+stays harmlessly energized against it (the limit switch opens the motor
+circuit) until the window ends — the command returning after ~75s is expected,
+not a hang. `close` retracts fully.
 
 Exit codes during the bench: `open` exits 0; `close` exits 1 with a
 "position_unverified" log line until the reed switch is mounted — that is
@@ -65,7 +70,8 @@ Starting numbers (nominal 14.6" retracted / 24.4" extended pin-to-pin):
 
 Procedure:
 
-1. Drive to full retraction and measure this unit's actual pin-to-pin length.
+1. With the actuator still unbolted, run `close --door run` again to drive it
+   to full retraction, then measure this unit's actual pin-to-pin length.
 2. Close the door snug against its stops; hold the retracted actuator level at
    header height; position both brackets so the pins drop in with the door
    seated. Lag-screw into solid framing. Bracket pivots vertical so the
@@ -76,6 +82,18 @@ Procedure:
    frame, aligned with ≤ 1/2" gap when the door is seated.
 5. Remove the thumb latch or fix it permanently open — the self-locking screw
    is the latch now.
+
+## Go live
+
+```bash
+sudo systemctl start coop-door.service
+```
+
+Then supervise the first full cycle from the dashboard: the coop door closes at
+sunset+30 and the run door at sunset+35 with a verified "closed" state that
+evening, and the run door opens at 7:00 the next morning. If you deployed this
+code as an in-place upgrade, `docs/existing-raspberry-pi-upgrade.md` covers
+getting the code onto the Pi.
 
 ## Schedule
 
@@ -89,7 +107,7 @@ coop door's sunset+30 close. Both values live in `coop_door.ini`. Note:
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Door drives the wrong way | Lead polarity | Swap leads at OUT3/OUT4 |
+| Door drives the wrong way | Lead polarity | Unplug the 12V adapter, then swap leads at OUT3/OUT4 |
 | `run_position_unverified` at night | Obstruction, bracket drift, or reed misalignment | Inspect door path; re-run close; re-align magnet |
 | `run_reed_contradiction` after open | Door never moved, or reed stuck | Check actuator pins/wiring; check reed with magnet |
 | Motor hums, no motion | Supply sagging under load | Check adapter amps; try 12V/5A |
