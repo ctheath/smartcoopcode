@@ -82,6 +82,10 @@ Set:
 - `open_stop_mode`: use `brake_hold` to keep active brake after opening, or `brake_pulse` if the door holds open mechanically
 - `close_stop_mode`: keep `coast` if you like the gentle settling on close
 
+To also automate the run door with the linear actuator, add a `[run_door]`
+section (see `coop_door.example.ini`) and follow `docs/run-door.md` for wiring,
+bench testing, and mounting.
+
 ## 6. Test Locally Before Enabling the Service
 
 Run these from `/home/chance/coophub`:

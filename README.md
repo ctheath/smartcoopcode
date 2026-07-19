@@ -48,6 +48,19 @@ For hosted access, expose the local dashboard with Cloudflare Tunnel. See `docs/
 
 If the Raspberry Pi already has the old coop scripts and you are upgrading in place, follow `docs/existing-raspberry-pi-upgrade.md`.
 
+## Run Door
+
+With a `[run_door]` section in `coop_door.ini`, the same service also drives the
+run's swing door with a linear actuator: opens at 7:00 AM or sunrise (whichever
+is later), closes 35 minutes after sunset. Wiring, mounting, and tuning are in
+`docs/run-door.md`.
+
+```bash
+python3 coop_door.py --config coop_door.ini status --door run
+python3 coop_door.py --config coop_door.ini open --door run
+python3 coop_door.py --config coop_door.ini close --door run
+```
+
 ## Run At Boot With systemd
 
 Copy the repo to `/home/chance/coophub`, then create the password environment file and install the service:
@@ -74,3 +87,9 @@ journalctl -u coop-door.service -f
 - The Pi's system clock is the source of local time. If it boots with an obviously stale time, the service waits and retries instead of moving the door at the wrong time.
 - If the motor runs longer than `motor_timeout_seconds` without the target reed switch triggering, the motor stops, the event is logged as `position_unverified`, and the scheduler waits for the next normal event instead of repeatedly retrying.
 - By default, opening stops with active brake (`IN1=HIGH`, `IN2=HIGH`) and closing stops with coast (`IN1=LOW`, `IN2=LOW`).
+
+## Tests
+
+```bash
+.venv/bin/python -m unittest discover -v
+```
