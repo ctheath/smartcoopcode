@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import coop_door
@@ -487,6 +488,60 @@ class ReconcileAllTests(unittest.TestCase):
             )
 
             self.assertEqual([], run_controller.moves)
+
+
+class FakeActuator:
+    def __init__(self):
+        self.moves = []
+        self.cleaned_up = False
+
+    def current_position(self):
+        return None
+
+    def move_to(self, target_state):
+        self.moves.append(target_state)
+        return coop_door.MovementResult(
+            target_state=target_state,
+            verified=True,
+            timed_out=False,
+            already_in_position=False,
+        )
+
+    def cleanup(self):
+        self.cleaned_up = True
+
+
+class CliDoorRoutingTests(unittest.TestCase):
+    def write_config(self, tmp, include_run_door=True):
+        lines = ["[location]", "latitude = 40.0", "longitude = -105.0"]
+        if include_run_door:
+            lines.append("[run_door]")
+        path = Path(tmp) / "coop_door.ini"
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return path
+
+    def test_open_with_door_run_uses_actuator_controller(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_config(tmp)
+            fake = FakeActuator()
+
+            with patch.object(coop_door, "ActuatorController", return_value=fake):
+                exit_code = coop_door.main(
+                    ["--config", str(path), "open", "--door", "run"]
+                )
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual([coop_door.STATE_OPEN], fake.moves)
+            self.assertTrue(fake.cleaned_up)
+
+    def test_door_run_without_config_section_exits_with_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_config(tmp, include_run_door=False)
+
+            with self.assertRaises(SystemExit) as ctx:
+                coop_door.main(["--config", str(path), "status", "--door", "run"])
+
+            self.assertEqual(2, ctx.exception.code)
 
 
 if __name__ == "__main__":

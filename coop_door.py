@@ -807,9 +807,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("open", help="Open the door now")
-    subparsers.add_parser("close", help="Close the door now")
-    subparsers.add_parser("status", help="Print the current reed-switch position")
+    for name, help_text in (
+        ("open", "Open the selected door now"),
+        ("close", "Close the selected door now"),
+        ("status", "Print the selected door's current position"),
+    ):
+        sub = subparsers.add_parser(name, help=help_text)
+        sub.add_argument(
+            "--door",
+            choices=("coop", "run"),
+            default="coop",
+            help="Which door to control (default: coop)",
+        )
     subparsers.add_parser("run", help="Run the sunrise/sunset scheduler")
 
     args = parser.parse_args(argv)
@@ -820,7 +829,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         run_forever(config)
         return 0
 
-    controller = DoorController(config)
+    door = getattr(args, "door", "coop")
+    if door == "run":
+        if config.run_door is None:
+            parser.error(
+                "run door is not configured; add a [run_door] section to the config"
+            )
+        controller = ActuatorController(config)
+    else:
+        controller = DoorController(config)
     try:
         if args.command == "open":
             result = controller.move_to(STATE_OPEN)
