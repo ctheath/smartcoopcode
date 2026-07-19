@@ -44,6 +44,7 @@ class FakeGPIO:
         self.outputs = []
         self.setups = []
         self.cleaned_up = False
+        self.cleaned_channels = None
 
     def setmode(self, mode):
         self.mode = mode
@@ -61,8 +62,9 @@ class FakeGPIO:
     def output(self, pin, value):
         self.outputs.append((pin, value))
 
-    def cleanup(self):
+    def cleanup(self, channels=None):
         self.cleaned_up = True
+        self.cleaned_channels = channels
 
 
 class RecordingDoorController:
@@ -153,6 +155,12 @@ class CoopDoorScheduleTests(unittest.TestCase):
         self.assertFalse(coop_door.is_time_valid(datetime(1970, 1, 1, tzinfo=DENVER), config))
         self.assertTrue(coop_door.is_time_valid(datetime(2026, 4, 25, tzinfo=DENVER), config))
 
+    def test_default_offsets_are_exact_sunrise_and_sunset_plus_thirty(self):
+        config = coop_door.DoorConfig()
+
+        self.assertEqual(0, config.open_offset_minutes)
+        self.assertEqual(30, config.close_offset_minutes)
+
 
 class CoopDoorMotorTests(unittest.TestCase):
     def make_controller(self, gpio, clock=None, **overrides):
@@ -239,6 +247,37 @@ class CoopDoorMotorTests(unittest.TestCase):
         self.assertEqual([], gpio.outputs)
 
 
+class MovementResultStatusTests(unittest.TestCase):
+    def test_position_status_prefers_contradiction_over_other_flags(self):
+        result = coop_door.MovementResult(
+            target_state=coop_door.STATE_OPEN,
+            verified=False,
+            timed_out=False,
+            already_in_position=False,
+            contradiction=True,
+        )
+
+        self.assertEqual("reed_contradiction", result.position_status)
+
+    def test_position_status_unchanged_for_existing_shapes(self):
+        verified = coop_door.MovementResult(
+            target_state=coop_door.STATE_OPEN,
+            verified=True,
+            timed_out=False,
+            already_in_position=False,
+        )
+        unverified = coop_door.MovementResult(
+            target_state=coop_door.STATE_CLOSED,
+            verified=False,
+            timed_out=True,
+            already_in_position=False,
+        )
+
+        self.assertEqual("open", verified.position_status)
+        self.assertEqual("position_unverified", unverified.position_status)
+        self.assertFalse(verified.contradiction)
+
+
 class CoopDoorStateTests(unittest.TestCase):
     def test_state_store_remembers_attempted_event_to_avoid_retry_thrash(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -259,6 +298,25 @@ class CoopDoorStateTests(unittest.TestCase):
 
             self.assertTrue(store.was_attempted("open:2026-04-25T06:30:00-06:00"))
 
+    def test_record_attempt_persists_contradiction_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            store = coop_door.StateStore(path)
+
+            store.record_attempt(
+                "run:open:2026-04-25T07:00:00-06:00",
+                coop_door.MovementResult(
+                    target_state=coop_door.STATE_OPEN,
+                    verified=False,
+                    timed_out=False,
+                    already_in_position=False,
+                    contradiction=True,
+                ),
+                datetime(2026, 4, 25, 7, 0, tzinfo=DENVER),
+            )
+
+            self.assertIs(True, store.read()["last_attempt"]["contradiction"])
+
     def test_manual_close_during_day_prevents_reopen_until_evening_close(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = coop_door.DoorConfig(
@@ -270,7 +328,7 @@ class CoopDoorStateTests(unittest.TestCase):
             store = coop_door.StateStore(config.state_file)
             store.record_manual_override(
                 target_state=coop_door.STATE_CLOSED,
-                override_until=datetime(2026, 4, 25, 19, 0, tzinfo=DENVER),
+                override_until=datetime(2026, 4, 25, 18, 30, tzinfo=DENVER),
                 set_at=datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
             )
             controller = RecordingDoorController(coop_door.STATE_CLOSED)
@@ -284,7 +342,7 @@ class CoopDoorStateTests(unittest.TestCase):
             )
 
             self.assertEqual(coop_door.STATE_OPEN, event.target_state)
-            self.assertEqual(datetime(2026, 4, 25, 19, 0, tzinfo=DENVER), event.next_change_at)
+            self.assertEqual(datetime(2026, 4, 25, 18, 30, tzinfo=DENVER), event.next_change_at)
             self.assertEqual([], controller.moves)
 
     def test_manual_open_at_night_prevents_close_until_morning_open(self):
@@ -298,7 +356,7 @@ class CoopDoorStateTests(unittest.TestCase):
             store = coop_door.StateStore(config.state_file)
             store.record_manual_override(
                 target_state=coop_door.STATE_OPEN,
-                override_until=datetime(2026, 4, 26, 6, 30, tzinfo=DENVER),
+                override_until=datetime(2026, 4, 26, 7, 0, tzinfo=DENVER),
                 set_at=datetime(2026, 4, 25, 21, 0, tzinfo=DENVER),
             )
             controller = RecordingDoorController(coop_door.STATE_OPEN)
@@ -312,7 +370,7 @@ class CoopDoorStateTests(unittest.TestCase):
             )
 
             self.assertEqual(coop_door.STATE_CLOSED, event.target_state)
-            self.assertEqual(datetime(2026, 4, 26, 6, 30, tzinfo=DENVER), event.next_change_at)
+            self.assertEqual(datetime(2026, 4, 26, 7, 0, tzinfo=DENVER), event.next_change_at)
             self.assertEqual([], controller.moves)
 
     def test_manual_override_expires_at_next_schedule_boundary(self):
@@ -326,13 +384,13 @@ class CoopDoorStateTests(unittest.TestCase):
             store = coop_door.StateStore(config.state_file)
             store.record_manual_override(
                 target_state=coop_door.STATE_CLOSED,
-                override_until=datetime(2026, 4, 25, 19, 0, tzinfo=DENVER),
+                override_until=datetime(2026, 4, 25, 18, 30, tzinfo=DENVER),
                 set_at=datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
             )
             controller = RecordingDoorController(coop_door.STATE_OPEN)
 
             coop_door.reconcile_once(
-                datetime(2026, 4, 25, 19, 1, tzinfo=DENVER),
+                datetime(2026, 4, 25, 18, 31, tzinfo=DENVER),
                 config,
                 controller,
                 store,
@@ -341,7 +399,7 @@ class CoopDoorStateTests(unittest.TestCase):
 
             self.assertEqual([coop_door.STATE_CLOSED], controller.moves)
             self.assertIsNone(
-                store.active_manual_override(datetime(2026, 4, 25, 19, 1, tzinfo=DENVER))
+                store.active_manual_override(datetime(2026, 4, 25, 18, 31, tzinfo=DENVER))
             )
 
 

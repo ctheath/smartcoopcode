@@ -1,6 +1,7 @@
 import base64
 import os
 import tempfile
+import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +30,7 @@ class FakeRuntime:
         self.status_payload = {
             "position": "open",
             "desired_state": "open",
-            "next_change_at": "2026-04-25T19:00:00-06:00",
+            "next_change_at": "2026-04-25T18:30:00-06:00",
             "busy": False,
             "last_attempt": None,
             "errors": [],
@@ -38,10 +39,11 @@ class FakeRuntime:
     def get_status(self):
         return dict(self.status_payload)
 
-    def command(self, action):
-        self.commands.append(action)
+    def command(self, action, door="coop"):
+        self.commands.append((action, door))
         return {
             "action": action,
+            "door": door,
             "result": {
                 "target_state": action,
                 "verified": True,
@@ -57,6 +59,7 @@ class FakeDoorController:
         self.position = position
         self.moves = []
         self.cleaned_up = False
+        self.stopped = False
 
     def current_position(self):
         return self.position
@@ -70,6 +73,9 @@ class FakeDoorController:
             timed_out=False,
             already_in_position=False,
         )
+
+    def stop_motor(self, target_state=None):
+        self.stopped = True
 
     def cleanup(self):
         self.cleaned_up = True
@@ -125,7 +131,7 @@ class CoopWebAuthTests(unittest.TestCase):
         )
 
         self.assertEqual(200, response.status_code)
-        self.assertEqual(["close"], runtime.commands)
+        self.assertEqual([("close", "coop")], runtime.commands)
         self.assertEqual("close", response.get_json()["result"]["target_state"])
 
 
@@ -167,7 +173,7 @@ class CoopWebRuntimeTests(unittest.TestCase):
 
             self.assertIsNone(status["position"])
             self.assertEqual("open", status["desired_state"])
-            self.assertEqual("2026-04-25T19:00:00-06:00", status["next_change_at"])
+            self.assertEqual("2026-04-25T18:30:00-06:00", status["next_change_at"])
             self.assertFalse(status["busy"])
             self.assertEqual("manual", status["last_attempt"]["source"])
             self.assertIn("unknown_position", status["errors"])
@@ -231,7 +237,7 @@ class CoopWebRuntimeTests(unittest.TestCase):
 
             override = store.active_manual_override(datetime(2026, 4, 25, 12, 1, tzinfo=DENVER))
             self.assertEqual("closed", override["target_state"])
-            self.assertEqual("2026-04-25T19:00:00-06:00", override["until"])
+            self.assertEqual("2026-04-25T18:30:00-06:00", override["until"])
 
     def test_runtime_status_includes_clear_schedule_fields_and_active_override(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -240,7 +246,7 @@ class CoopWebRuntimeTests(unittest.TestCase):
             store = coop_door.StateStore(state_file)
             store.record_manual_override(
                 target_state=coop_door.STATE_CLOSED,
-                override_until=datetime(2026, 4, 25, 19, 0, tzinfo=DENVER),
+                override_until=datetime(2026, 4, 25, 18, 30, tzinfo=DENVER),
                 set_at=datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
             )
             runtime = coop_web.CoopWebRuntime(
@@ -255,9 +261,9 @@ class CoopWebRuntimeTests(unittest.TestCase):
 
             self.assertEqual("open", status["scheduled_state_now"])
             self.assertEqual("closed", status["next_scheduled_action"])
-            self.assertEqual("2026-04-25T19:00:00-06:00", status["next_change_at"])
+            self.assertEqual("2026-04-25T18:30:00-06:00", status["next_change_at"])
             self.assertEqual("closed", status["manual_override"]["target_state"])
-            self.assertEqual("2026-04-25T19:00:00-06:00", status["manual_override"]["until"])
+            self.assertEqual("2026-04-25T18:30:00-06:00", status["manual_override"]["until"])
 
     def test_dashboard_uses_schedule_now_and_next_wording(self):
         template = Path("web/templates/dashboard.html").read_text(encoding="utf-8")
@@ -290,6 +296,186 @@ class CoopWebRuntimeTests(unittest.TestCase):
             response = app.test_client().get("/api/status", headers=basic_auth("from-env"))
 
         self.assertEqual(200, response.status_code)
+
+
+class RunDoorWebTests(unittest.TestCase):
+    def make_run_config(self, tmp):
+        return coop_door.DoorConfig(
+            latitude=40.0,
+            longitude=-105.0,
+            timezone="America/Denver",
+            state_file=Path(tmp) / "state.json",
+            run_door=coop_door.RunDoorConfig(state_file=Path(tmp) / "run_state.json"),
+        )
+
+    def make_runtime(self, tmp, run_position=None):
+        config = self.make_run_config(tmp)
+        run_controller = FakeDoorController(position=run_position)
+        runtime = coop_web.CoopWebRuntime(
+            config=config,
+            controller=FakeDoorController(position=coop_door.STATE_OPEN),
+            state_store=coop_door.StateStore(config.state_file),
+            run_controller=run_controller,
+            run_state_store=coop_door.StateStore(config.run_door.state_file),
+            now=lambda: datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
+            sun_provider=fixed_sun_provider,
+        )
+        return runtime, run_controller
+
+    def test_status_nulls_run_door_when_not_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = coop_door.DoorConfig(
+                latitude=40.0,
+                longitude=-105.0,
+                timezone="America/Denver",
+                state_file=Path(tmp) / "state.json",
+            )
+            runtime = coop_web.CoopWebRuntime(
+                config=config,
+                controller=FakeDoorController(position=coop_door.STATE_OPEN),
+                state_store=coop_door.StateStore(config.state_file),
+                now=lambda: datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
+                sun_provider=fixed_sun_provider,
+            )
+
+            status = runtime.get_status()
+
+            self.assertIsNone(status["run_door"])
+
+    def test_status_includes_run_door_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp, run_position=None)
+
+            status = runtime.get_status()
+            run = status["run_door"]
+
+            self.assertIsNone(run["position"])
+            self.assertEqual("open", run["desired_state"])
+            self.assertEqual("closed", run["next_scheduled_action"])
+            self.assertEqual("2026-04-25T18:35:00-06:00", run["next_change_at"])
+            self.assertIsNone(run["manual_override"])
+
+    def test_status_reports_run_door_errors_with_door_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            runtime.run_state_store.record_attempt(
+                "run:closed:2026-04-24T18:35:00-06:00",
+                coop_door.MovementResult(
+                    target_state=coop_door.STATE_CLOSED,
+                    verified=False,
+                    timed_out=False,
+                    already_in_position=False,
+                ),
+                datetime(2026, 4, 24, 18, 35, tzinfo=DENVER),
+            )
+
+            status = runtime.get_status()
+
+            self.assertIn("run_position_unverified", status["errors"])
+
+    def test_status_reports_run_reed_contradiction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            runtime.run_state_store.record_attempt(
+                "run:open:2026-04-25T07:00:00-06:00",
+                coop_door.MovementResult(
+                    target_state=coop_door.STATE_OPEN,
+                    verified=False,
+                    timed_out=False,
+                    already_in_position=False,
+                    contradiction=True,
+                ),
+                datetime(2026, 4, 25, 7, 0, tzinfo=DENVER),
+            )
+
+            status = runtime.get_status()
+
+            self.assertIn("run_reed_contradiction", status["errors"])
+
+    def test_command_routes_to_run_door_and_records_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, run_controller = self.make_runtime(
+                tmp, run_position=coop_door.STATE_CLOSED
+            )
+
+            result = runtime.command("close", door="run")
+
+            self.assertEqual("closed", result["result"]["target_state"])
+            self.assertEqual("run", result["door"])
+            self.assertEqual(["closed"], run_controller.moves)
+            override = runtime.run_state_store.active_manual_override(
+                datetime(2026, 4, 25, 12, 1, tzinfo=DENVER)
+            )
+            self.assertEqual("closed", override["target_state"])
+            self.assertEqual("2026-04-25T18:35:00-06:00", override["until"])
+
+    def test_command_rejects_run_door_when_not_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = coop_door.DoorConfig(state_file=Path(tmp) / "state.json")
+            runtime = coop_web.CoopWebRuntime(
+                config=config,
+                controller=FakeDoorController(position=coop_door.STATE_OPEN),
+                state_store=coop_door.StateStore(config.state_file),
+                now=lambda: datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
+                sun_provider=fixed_sun_provider,
+            )
+
+            with self.assertRaises(ValueError):
+                runtime.command("open", door="run")
+
+    def test_command_endpoint_passes_door_through(self):
+        runtime = FakeRuntime()
+        app = coop_web.create_app(runtime, password="secret")
+        app.testing = True
+        client = app.test_client()
+
+        response = client.post(
+            "/api/command",
+            json={"action": "open", "door": "run"},
+            headers={**basic_auth(), "X-CSRF-Token": runtime.csrf_token},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual([("open", "run")], runtime.commands)
+
+    def test_command_endpoint_rejects_unknown_door(self):
+        runtime = FakeRuntime()
+        app = coop_web.create_app(runtime, password="secret")
+        app.testing = True
+        client = app.test_client()
+
+        response = client.post(
+            "/api/command",
+            json={"action": "open", "door": "garage"},
+            headers={**basic_auth(), "X-CSRF-Token": runtime.csrf_token},
+        )
+
+        self.assertEqual(400, response.status_code)
+
+    def test_stop_waits_for_hardware_lock_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, run_controller = self.make_runtime(tmp)
+            runtime._hardware_lock.acquire()
+            stopper = threading.Thread(target=runtime.stop)
+            stopper.start()
+            stopper.join(timeout=0.2)
+            self.assertTrue(stopper.is_alive())
+            runtime._hardware_lock.release()
+            stopper.join(timeout=2)
+            self.assertFalse(stopper.is_alive())
+            self.assertTrue(run_controller.stopped)
+            self.assertTrue(runtime.controller.cleaned_up)
+
+    def test_dashboard_includes_hidden_run_door_card_and_buttons(self):
+        template = Path("web/templates/dashboard.html").read_text(encoding="utf-8")
+
+        self.assertIn('id="run-door-section"', template)
+        self.assertIn('data-door="run"', template)
+        self.assertIn('data-door="coop"', template)
+        self.assertIn("Run Door", template)
+
+        css = Path("web/static/dashboard.css").read_text(encoding="utf-8")
+        self.assertIn("[hidden]", css)
 
 
 if __name__ == "__main__":

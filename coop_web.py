@@ -34,6 +34,8 @@ class CoopWebRuntime:
         config: coop_door.DoorConfig,
         controller: Optional[coop_door.DoorController] = None,
         state_store: Optional[coop_door.StateStore] = None,
+        run_controller=None,
+        run_state_store: Optional[coop_door.StateStore] = None,
         now: Optional[Callable[[], datetime]] = None,
         sun_provider: coop_door.SunProvider = coop_door.astral_sun_provider,
         logger: Optional[logging.Logger] = None,
@@ -41,6 +43,14 @@ class CoopWebRuntime:
         self.config = config
         self.controller = controller or coop_door.DoorController(config)
         self.state_store = state_store or coop_door.StateStore(config.state_file)
+        if config.run_door is not None:
+            self.run_controller = run_controller or coop_door.ActuatorController(config)
+            self.run_state_store = run_state_store or coop_door.StateStore(
+                config.run_door.state_file
+            )
+        else:
+            self.run_controller = None
+            self.run_state_store = None
         self.now = now or (lambda: datetime.now(config.tz))
         self.sun_provider = sun_provider
         self.logger = logger or logging.getLogger(__name__)
@@ -98,6 +108,10 @@ class CoopWebRuntime:
         if last_scheduler_exception:
             errors.append(f"scheduler_exception: {last_scheduler_exception}")
 
+        run_door_status = None
+        if self.run_controller is not None:
+            run_door_status = self._run_door_status(now, errors)
+
         return {
             "now": now.isoformat(),
             "position": position,
@@ -106,15 +120,68 @@ class CoopWebRuntime:
             "next_scheduled_action": next_scheduled_action,
             "next_change_at": next_change_at,
             "manual_override": manual_override,
+            "run_door": run_door_status,
             "busy": busy,
             "last_attempt": last_attempt,
             "errors": errors,
         }
 
-    def command(self, action: str) -> Dict[str, object]:
+    def _run_door_status(self, now: datetime, errors: list) -> Dict[str, object]:
+        desired_state = None
+        next_scheduled_action = None
+        next_change_at = None
+        try:
+            event = coop_door.run_desired_event_for_now(now, self.config, self.sun_provider)
+            desired_state = event.target_state
+            next_scheduled_action = _next_scheduled_action_for_event(event)
+            next_change_at = event.next_change_at.isoformat()
+        except Exception as exc:
+            errors.append(f"run_schedule_error: {type(exc).__name__}: {exc}")
+
+        # Reed input reads are atomic and electrically independent of the
+        # driven pins, so this is intentionally unlocked (unlike the coop's
+        # _position_snapshot, which caches under the hardware lock).
+        try:
+            position = self.run_controller.current_position()
+        except Exception as exc:
+            position = None
+            errors.append(f"run_hardware_error: {type(exc).__name__}: {exc}")
+
+        state = self.run_state_store.read()
+        last_attempt = _last_attempt_from_state(state)
+        # No unknown_position-style error here: None is the run door's normal
+        # daytime reading, since its reed can only prove "closed".
+        if last_attempt:
+            if last_attempt.get("position_status") == "position_unverified":
+                errors.append("run_position_unverified")
+            if last_attempt.get("position_status") == "reed_contradiction":
+                errors.append("run_reed_contradiction")
+
+        return {
+            "position": position,
+            "desired_state": desired_state,
+            "next_scheduled_action": next_scheduled_action,
+            "next_change_at": next_change_at,
+            "manual_override": self.run_state_store.active_manual_override(now),
+            "last_attempt": last_attempt,
+        }
+
+    def command(self, action: str, door: str = "coop") -> Dict[str, object]:
         target_state = _target_state_for_action(action)
         if target_state is None:
             raise ValueError(f"Unsupported action: {action}")
+        if door == "run":
+            if self.run_controller is None:
+                raise ValueError("Run door is not configured")
+            controller = self.run_controller
+            state_store = self.run_state_store
+            event_fn = coop_door.run_desired_event_for_now
+        elif door == "coop":
+            controller = self.controller
+            state_store = self.state_store
+            event_fn = coop_door.desired_event_for_now
+        else:
+            raise ValueError(f"Unsupported door: {door}")
 
         if not self._hardware_lock.acquire(blocking=False):
             raise CoopBusyError("Door hardware is busy")
@@ -122,19 +189,21 @@ class CoopWebRuntime:
         self._set_busy(True)
         attempted_at = self.now()
         try:
-            event = coop_door.desired_event_for_now(attempted_at, self.config, self.sun_provider)
-            result = self.controller.move_to(target_state)
-            self._last_position = result.target_state if result.verified else None
+            event = event_fn(attempted_at, self.config, self.sun_provider)
+            result = controller.move_to(target_state)
+            if door == "coop":
+                self._last_position = result.target_state if result.verified else None
             event_key = f"manual:{target_state}:{attempted_at.isoformat()}"
-            self.state_store.record_attempt(event_key, result, attempted_at, source="manual")
+            state_store.record_attempt(event_key, result, attempted_at, source="manual")
             if result.verified and target_state != event.target_state:
-                self.state_store.record_manual_override(
+                state_store.record_manual_override(
                     target_state=target_state,
                     override_until=event.next_change_at,
                     set_at=attempted_at,
                 )
             return {
                 "action": action,
+                "door": door,
                 "result": _movement_result_payload(result),
             }
         finally:
@@ -157,7 +226,10 @@ class CoopWebRuntime:
         self._stop_scheduler.set()
         if self._scheduler_thread:
             self._scheduler_thread.join(timeout=5)
-        self.controller.cleanup()
+        with self._hardware_lock:
+            if self.run_controller is not None:
+                self.run_controller.stop_motor()
+            self.controller.cleanup()
 
     def _scheduler_loop(self) -> None:
         while not self._stop_scheduler.is_set():
@@ -175,11 +247,21 @@ class CoopWebRuntime:
                     self._hardware_lock.acquire()
                     self._set_busy(True)
                     try:
-                        event = coop_door.reconcile_once(
+                        doors = [
+                            (self.controller, self.state_store, coop_door.desired_event_for_now)
+                        ]
+                        if self.run_controller is not None:
+                            doors.append(
+                                (
+                                    self.run_controller,
+                                    self.run_state_store,
+                                    coop_door.run_desired_event_for_now,
+                                )
+                            )
+                        next_change = coop_door.reconcile_all(
                             now,
                             self.config,
-                            self.controller,
-                            self.state_store,
+                            doors,
                             sun_provider=self.sun_provider,
                             logger=self.logger,
                         )
@@ -188,7 +270,7 @@ class CoopWebRuntime:
                         self._set_busy(False)
                         self._hardware_lock.release()
 
-                    sleep_seconds = max(1.0, (event.next_change_at - now).total_seconds())
+                    sleep_seconds = max(1.0, (next_change - now).total_seconds())
                     sleep_seconds = min(sleep_seconds, self.config.max_sleep_seconds)
 
                 self._set_scheduler_exception(None)
@@ -254,8 +336,11 @@ def create_app(runtime: CoopWebRuntime, password: Optional[str] = None) -> Flask
     def command():
         payload = request.get_json(silent=True) or {}
         action = payload.get("action")
+        door = payload.get("door", "coop")
+        if door not in {"coop", "run"}:
+            return jsonify({"error": f"Unsupported door: {door}"}), 400
         try:
-            return jsonify(runtime.command(action))
+            return jsonify(runtime.command(action, door=door))
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except CoopBusyError as exc:

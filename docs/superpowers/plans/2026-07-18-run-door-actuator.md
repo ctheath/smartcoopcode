@@ -89,15 +89,28 @@ close_offset_minutes = 30
 This Raspberry Pi controller opens the coop door at sunrise and closes it 30 minutes after sunset. Sunrise and sunset are calculated locally with `astral`, so normal operation does not depend on Wi-Fi or a weather API.
 ```
 
-- [ ] **Step 6: Run the full suite** (existing schedule tests pass explicit offsets, so only the new test exercises defaults)
+- [ ] **Step 6: Update the five regression tests that hardcode the old default times.** These build `DoorConfig` without offset overrides, so the default change moves their expected clock times by the offset deltas (close 19:00 → 18:30, open 6:30 → 7:00):
+
+In `tests/test_coop_door.py` (`CoopDoorStateTests`):
+- `test_manual_close_during_day_prevents_reopen_until_evening_close`: `override_until=datetime(2026, 4, 25, 19, 0, ...)` → `18, 30`; assertion `datetime(2026, 4, 25, 19, 0, ...)` → `18, 30`.
+- `test_manual_open_at_night_prevents_close_until_morning_open`: `override_until=datetime(2026, 4, 26, 6, 30, ...)` → `7, 0`; assertion `datetime(2026, 4, 26, 6, 30, ...)` → `7, 0`.
+
+In `tests/test_coop_web.py`:
+- `test_runtime_status_includes_position_schedule_last_attempt_busy_and_errors`: `"2026-04-25T19:00:00-06:00"` → `"2026-04-25T18:30:00-06:00"`.
+- `test_runtime_command_records_override_until_next_schedule_boundary`: expected `override["until"]` `"2026-04-25T19:00:00-06:00"` → `"2026-04-25T18:30:00-06:00"`.
+- `test_runtime_status_includes_clear_schedule_fields_and_active_override`: the `record_manual_override(override_until=datetime(2026, 4, 25, 19, 0, ...))` → `18, 30`; both `"2026-04-25T19:00:00-06:00"` assertions → `"2026-04-25T18:30:00-06:00"`.
+
+(`test_manual_override_expires_at_next_schedule_boundary` still passes untouched — its 19:01 reconcile time is after the new 18:30 close too — so leave it alone.)
+
+- [ ] **Step 7: Run the full suite**
 
 Run: `.venv/bin/python -m unittest discover -v`
 Expected: `Ran 26 tests` ... `OK`
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add tests/test_coop_door.py coop_door.py coop_door.example.ini README.md
+git add tests/test_coop_door.py tests/test_coop_web.py coop_door.py coop_door.example.ini README.md
 git commit -m "feat: default coop schedule to exact sunrise and sunset+30"
 ```
 

@@ -10,7 +10,7 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 from typing import Callable, Dict, Optional
 from zoneinfo import ZoneInfo
@@ -34,7 +34,22 @@ DEFAULT_IN2_PIN = 27
 DEFAULT_REED_OPEN_PIN = 22
 DEFAULT_REED_CLOSED_PIN = 23
 
+DEFAULT_RUN_IN1_PIN = 5
+DEFAULT_RUN_IN2_PIN = 6
+DEFAULT_RUN_REED_CLOSED_PIN = 24
+
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("coop_door.ini")
+
+
+@dataclass(frozen=True)
+class RunDoorConfig:
+    in1_pin: int = DEFAULT_RUN_IN1_PIN
+    in2_pin: int = DEFAULT_RUN_IN2_PIN
+    reed_closed_pin: int = DEFAULT_RUN_REED_CLOSED_PIN
+    travel_seconds: float = 75.0
+    open_time: dt_time = dt_time(7, 0)
+    close_offset_minutes: int = 35
+    state_file: Path = Path("run_door_state.json")
 
 
 @dataclass(frozen=True)
@@ -42,8 +57,8 @@ class DoorConfig:
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     timezone: str = "America/Denver"
-    open_offset_minutes: int = -30
-    close_offset_minutes: int = 60
+    open_offset_minutes: int = 0
+    close_offset_minutes: int = 30
     in1_pin: int = DEFAULT_IN1_PIN
     in2_pin: int = DEFAULT_IN2_PIN
     reed_open_pin: int = DEFAULT_REED_OPEN_PIN
@@ -57,6 +72,7 @@ class DoorConfig:
     invalid_time_retry_seconds: float = 60.0
     max_sleep_seconds: float = 3600.0
     state_file: Path = Path("coop_door_state.json")
+    run_door: Optional[RunDoorConfig] = None
 
     @property
     def tz(self) -> ZoneInfo:
@@ -82,9 +98,12 @@ class MovementResult:
     verified: bool
     timed_out: bool
     already_in_position: bool
+    contradiction: bool = False
 
     @property
     def position_status(self) -> str:
+        if self.contradiction:
+            return "reed_contradiction"
         if self.verified:
             return self.target_state
         return "position_unverified"
@@ -121,34 +140,79 @@ def calculate_schedule(
     return DailySchedule(open_at=open_at, close_at=close_at)
 
 
+ScheduleForDay = Callable[[date], DailySchedule]
+
+
+def _desired_event(
+    now: datetime,
+    tz: ZoneInfo,
+    schedule_for_day: ScheduleForDay,
+    key_prefix: str = "",
+) -> DesiredEvent:
+    now = now.astimezone(tz)
+    today = schedule_for_day(now.date())
+
+    if today.open_at <= now < today.close_at:
+        return DesiredEvent(
+            target_state=STATE_OPEN,
+            key=_event_key(STATE_OPEN, today.open_at, key_prefix),
+            next_change_at=today.close_at,
+        )
+
+    if now < today.open_at:
+        yesterday = schedule_for_day(now.date() - timedelta(days=1))
+        return DesiredEvent(
+            target_state=STATE_CLOSED,
+            key=_event_key(STATE_CLOSED, yesterday.close_at, key_prefix),
+            next_change_at=today.open_at,
+        )
+
+    tomorrow = schedule_for_day(now.date() + timedelta(days=1))
+    return DesiredEvent(
+        target_state=STATE_CLOSED,
+        key=_event_key(STATE_CLOSED, today.close_at, key_prefix),
+        next_change_at=tomorrow.open_at,
+    )
+
+
 def desired_event_for_now(
     now: datetime,
     config: DoorConfig,
     sun_provider: SunProvider = astral_sun_provider,
 ) -> DesiredEvent:
-    now = now.astimezone(config.tz)
-    today = calculate_schedule(now.date(), config, sun_provider)
+    return _desired_event(
+        now,
+        config.tz,
+        lambda day: calculate_schedule(day, config, sun_provider),
+    )
 
-    if today.open_at <= now < today.close_at:
-        return DesiredEvent(
-            target_state=STATE_OPEN,
-            key=_event_key(STATE_OPEN, today.open_at),
-            next_change_at=today.close_at,
-        )
 
-    if now < today.open_at:
-        yesterday = calculate_schedule(now.date() - timedelta(days=1), config, sun_provider)
-        return DesiredEvent(
-            target_state=STATE_CLOSED,
-            key=_event_key(STATE_CLOSED, yesterday.close_at),
-            next_change_at=today.open_at,
-        )
+def run_calculate_schedule(
+    day: date,
+    config: DoorConfig,
+    sun_provider: SunProvider = astral_sun_provider,
+) -> DailySchedule:
+    if config.run_door is None:
+        raise ValueError("run_door configuration is required for the run door schedule")
+    sun_times = sun_provider(config, day)
+    open_floor = datetime.combine(day, config.run_door.open_time, tzinfo=config.tz)
+    open_at = max(sun_times["sunrise"], open_floor)
+    close_at = sun_times["sunset"] + timedelta(
+        minutes=config.run_door.close_offset_minutes
+    )
+    return DailySchedule(open_at=open_at, close_at=close_at)
 
-    tomorrow = calculate_schedule(now.date() + timedelta(days=1), config, sun_provider)
-    return DesiredEvent(
-        target_state=STATE_CLOSED,
-        key=_event_key(STATE_CLOSED, today.close_at),
-        next_change_at=tomorrow.open_at,
+
+def run_desired_event_for_now(
+    now: datetime,
+    config: DoorConfig,
+    sun_provider: SunProvider = astral_sun_provider,
+) -> DesiredEvent:
+    return _desired_event(
+        now,
+        config.tz,
+        lambda day: run_calculate_schedule(day, config, sun_provider),
+        key_prefix="run:",
     )
 
 
@@ -197,6 +261,40 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> DoorConfig:
     if brake_pulse_seconds < 0:
         raise ValueError("hardware.brake_pulse_seconds must be greater than or equal to 0")
 
+    state_file = get_path("runtime", "state_file", defaults.state_file)
+
+    run_door = None
+    if parser.has_section("run_door"):
+        run_defaults = RunDoorConfig()
+        open_time = run_defaults.open_time
+        if parser.has_option("run_door", "open_time"):
+            raw_open_time = parser.get("run_door", "open_time").strip()
+            try:
+                open_time = dt_time.fromisoformat(raw_open_time)
+            except ValueError as exc:
+                raise ValueError(
+                    "run_door.open_time must be HH:MM, for example 07:00"
+                ) from exc
+        run_door = RunDoorConfig(
+            in1_pin=get_int("run_door", "in1_pin", run_defaults.in1_pin),
+            in2_pin=get_int("run_door", "in2_pin", run_defaults.in2_pin),
+            reed_closed_pin=get_int(
+                "run_door", "reed_closed_pin", run_defaults.reed_closed_pin
+            ),
+            travel_seconds=get_float(
+                "run_door", "travel_seconds", run_defaults.travel_seconds
+            ),
+            open_time=open_time,
+            close_offset_minutes=get_int(
+                "run_door", "close_offset_minutes", run_defaults.close_offset_minutes
+            ),
+            state_file=get_path(
+                "run_door", "state_file", state_file.parent / run_defaults.state_file.name
+            ),
+        )
+        if run_door.travel_seconds <= 0:
+            raise ValueError("run_door.travel_seconds must be greater than 0")
+
     return DoorConfig(
         latitude=get_float("location", "latitude", defaults.latitude),
         longitude=get_float("location", "longitude", defaults.longitude),
@@ -219,7 +317,8 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> DoorConfig:
             "runtime", "invalid_time_retry_seconds", defaults.invalid_time_retry_seconds
         ),
         max_sleep_seconds=get_float("runtime", "max_sleep_seconds", defaults.max_sleep_seconds),
-        state_file=get_path("runtime", "state_file", defaults.state_file),
+        state_file=state_file,
+        run_door=run_door,
     )
 
 
@@ -356,6 +455,123 @@ class DoorController:
         return GPIO
 
 
+class ActuatorController:
+    """Timed drive for the run door linear actuator.
+
+    The actuator's internal limit switches physically stop it at both ends of
+    travel, so movement is a fixed-duration drive rather than sensor-terminated.
+    A reed switch verifies the closed position; open is trusted to the limit
+    switch and deliberately unsensed.
+    """
+
+    def __init__(
+        self,
+        config: DoorConfig,
+        gpio_module=None,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+        logger: Optional[logging.Logger] = None,
+    ):
+        if config.run_door is None:
+            raise ValueError("run_door configuration is required for ActuatorController")
+        self.config = config
+        self.run_config = config.run_door
+        self.gpio = gpio_module or DoorController._load_gpio()
+        self.sleep = sleep
+        self.monotonic = monotonic
+        self.logger = logger or logging.getLogger(__name__)
+        self._setup_gpio()
+
+    def current_position(self) -> Optional[str]:
+        if self.gpio.input(self.run_config.reed_closed_pin) == self.gpio.LOW:
+            return STATE_CLOSED
+        return None
+
+    def move_to(self, target_state: str) -> MovementResult:
+        if target_state not in {STATE_OPEN, STATE_CLOSED}:
+            raise ValueError(f"Unsupported target_state: {target_state}")
+
+        if target_state == STATE_CLOSED and self.current_position() == STATE_CLOSED:
+            self.logger.info("Run door already closed; not running actuator")
+            return MovementResult(
+                target_state=target_state,
+                verified=True,
+                timed_out=False,
+                already_in_position=True,
+            )
+
+        self._drive_motor(target_state)
+        deadline = self.monotonic() + self.run_config.travel_seconds
+        while self.monotonic() < deadline:
+            self.sleep(self.config.motor_poll_seconds)
+        self.stop_motor(target_state)
+
+        reed_closed = self.gpio.input(self.run_config.reed_closed_pin) == self.gpio.LOW
+        if target_state == STATE_CLOSED:
+            verified = reed_closed
+            contradiction = False
+            if verified:
+                self.logger.info("Run door reached verified closed position")
+            else:
+                self.logger.error(
+                    "Run door close finished without reed confirmation; position_unverified"
+                )
+        else:
+            contradiction = reed_closed
+            verified = not contradiction
+            if contradiction:
+                self.logger.error(
+                    "Run door reed still reads closed after open; reed_contradiction"
+                )
+            else:
+                self.logger.info("Run door open drive complete (limit switch assumed)")
+
+        return MovementResult(
+            target_state=target_state,
+            verified=verified,
+            timed_out=False,
+            already_in_position=False,
+            contradiction=contradiction,
+        )
+
+    def stop_motor(self, target_state: Optional[str] = None) -> None:
+        # target_state accepted for interface parity with DoorController; the
+        # actuator always coasts - the screw drive self-locks in place.
+        self.gpio.output(self.run_config.in1_pin, self.gpio.LOW)
+        self.gpio.output(self.run_config.in2_pin, self.gpio.LOW)
+
+    def cleanup(self) -> None:
+        """Release only this door's channels; the coop DoorController owns the
+        global GPIO teardown when both controllers share the module."""
+        self.stop_motor()
+        self.gpio.cleanup(
+            [
+                self.run_config.in1_pin,
+                self.run_config.in2_pin,
+                self.run_config.reed_closed_pin,
+            ]
+        )
+
+    def _setup_gpio(self) -> None:
+        self.gpio.setmode(self.gpio.BCM)
+        self.gpio.setup([self.run_config.in1_pin, self.run_config.in2_pin], self.gpio.OUT)
+        self.gpio.setup(
+            self.run_config.reed_closed_pin,
+            self.gpio.IN,
+            pull_up_down=self.gpio.PUD_UP,
+        )
+
+    def _drive_motor(self, target_state: str) -> None:
+        if target_state == STATE_OPEN:
+            self.logger.info("Opening run door (extend)")
+            self.gpio.output(self.run_config.in1_pin, self.gpio.HIGH)
+            self.gpio.output(self.run_config.in2_pin, self.gpio.LOW)
+            return
+        self.logger.info("Closing run door (retract)")
+        self.gpio.output(self.run_config.in1_pin, self.gpio.LOW)
+        self.gpio.output(self.run_config.in2_pin, self.gpio.HIGH)
+
+
 class StateStore:
     def __init__(self, path: Path):
         self.path = path
@@ -378,6 +594,7 @@ class StateStore:
             "position_status": result.position_status,
             "verified": result.verified,
             "timed_out": result.timed_out,
+            "contradiction": result.contradiction,
             "already_in_position": result.already_in_position,
             "attempted_at": attempted_at.isoformat(),
         }
@@ -459,16 +676,14 @@ class StateStore:
             return {}
 
 
-def reconcile_once(
+def reconcile_door(
     now: datetime,
-    config: DoorConfig,
-    controller: DoorController,
+    event: DesiredEvent,
+    controller,
     state_store: StateStore,
-    sun_provider: SunProvider = astral_sun_provider,
     logger: Optional[logging.Logger] = None,
-) -> DesiredEvent:
+) -> None:
     logger = logger or logging.getLogger(__name__)
-    event = desired_event_for_now(now, config, sun_provider)
     current_position = controller.current_position()
 
     logger.info(
@@ -479,7 +694,7 @@ def reconcile_once(
     )
 
     if current_position == event.target_state:
-        return event
+        return
 
     manual_override = state_store.active_manual_override(now)
     if manual_override is not None:
@@ -489,24 +704,69 @@ def reconcile_once(
             manual_override["until"],
             event.target_state,
         )
-        return event
+        return
 
     if state_store.was_attempted(event.key):
-        logger.warning(
-            "Already attempted %s and position is still not verified; skipping retry",
-            event.key,
-        )
-        return event
+        if state_store.read().get("last_verified"):
+            logger.info("Already completed %s; holding position", event.key)
+        else:
+            logger.warning(
+                "Already attempted %s and position is still not verified; skipping retry",
+                event.key,
+            )
+        return
 
     result = controller.move_to(event.target_state)
     state_store.record_attempt(event.key, result, now)
+
+
+def reconcile_once(
+    now: datetime,
+    config: DoorConfig,
+    controller: DoorController,
+    state_store: StateStore,
+    sun_provider: SunProvider = astral_sun_provider,
+    logger: Optional[logging.Logger] = None,
+) -> DesiredEvent:
+    event = desired_event_for_now(now, config, sun_provider)
+    reconcile_door(now, event, controller, state_store, logger)
     return event
+
+
+def reconcile_all(
+    now: datetime,
+    config: DoorConfig,
+    doors,
+    sun_provider: SunProvider = astral_sun_provider,
+    logger: Optional[logging.Logger] = None,
+) -> datetime:
+    """Reconcile every (controller, state_store, event_fn) door in sequence.
+
+    Sequential reconciliation is what guarantees the two motors never run
+    at the same time. Returns the nearest next_change_at across doors.
+    """
+    next_changes = []
+    for controller, state_store, event_fn in doors:
+        event = event_fn(now, config, sun_provider)
+        reconcile_door(now, event, controller, state_store, logger)
+        next_changes.append(event.next_change_at)
+    return min(next_changes)
 
 
 def run_forever(config: DoorConfig) -> None:
     logger = logging.getLogger(__name__)
-    state_store = StateStore(config.state_file)
     controller = DoorController(config, logger=logger)
+    doors = [(controller, StateStore(config.state_file), desired_event_for_now)]
+    run_controller = None
+    if config.run_door is not None:
+        run_controller = ActuatorController(config, logger=logger)
+        doors.append(
+            (
+                run_controller,
+                StateStore(config.run_door.state_file),
+                run_desired_event_for_now,
+            )
+        )
     try:
         while True:
             now = datetime.now(config.tz)
@@ -519,12 +779,14 @@ def run_forever(config: DoorConfig) -> None:
                 time.sleep(config.invalid_time_retry_seconds)
                 continue
 
-            event = reconcile_once(now, config, controller, state_store, logger=logger)
-            sleep_seconds = max(1.0, (event.next_change_at - now).total_seconds())
+            next_change = reconcile_all(now, config, doors, logger=logger)
+            sleep_seconds = max(1.0, (next_change - now).total_seconds())
             sleep_seconds = min(sleep_seconds, config.max_sleep_seconds)
             logger.info("Sleeping %.0f seconds before next check", sleep_seconds)
             time.sleep(sleep_seconds)
     finally:
+        if run_controller is not None:
+            run_controller.stop_motor()
         controller.cleanup()
 
 
@@ -545,9 +807,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("open", help="Open the door now")
-    subparsers.add_parser("close", help="Close the door now")
-    subparsers.add_parser("status", help="Print the current reed-switch position")
+    for name, help_text in (
+        ("open", "Open the selected door now"),
+        ("close", "Close the selected door now"),
+        ("status", "Print the selected door's current position"),
+    ):
+        sub = subparsers.add_parser(name, help=help_text)
+        sub.add_argument(
+            "--door",
+            choices=("coop", "run"),
+            default="coop",
+            help="Which door to control (default: coop)",
+        )
     subparsers.add_parser("run", help="Run the sunrise/sunset scheduler")
 
     args = parser.parse_args(argv)
@@ -558,7 +829,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         run_forever(config)
         return 0
 
-    controller = DoorController(config)
+    door = getattr(args, "door", "coop")
+    if door == "run":
+        if config.run_door is None:
+            parser.error(
+                "run door is not configured; add a [run_door] section to the config"
+            )
+        controller = ActuatorController(config)
+    else:
+        controller = DoorController(config)
     try:
         if args.command == "open":
             result = controller.move_to(STATE_OPEN)
@@ -575,8 +854,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     return 2
 
 
-def _event_key(target_state: str, event_time: datetime) -> str:
-    return f"{target_state}:{event_time.isoformat()}"
+def _event_key(target_state: str, event_time: datetime, prefix: str = "") -> str:
+    return f"{prefix}{target_state}:{event_time.isoformat()}"
 
 
 if __name__ == "__main__":
