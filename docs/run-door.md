@@ -44,10 +44,11 @@ cd /home/chance/coophub
 ```
 
 Expect: `status` prints `unknown` (reed not tripped). `open` drives for a fixed
-~75s window: the rod reaches the internal limit switch at ~55s and the motor
-stays harmlessly energized against it (the limit switch opens the motor
-circuit) until the window ends — the command returning after ~75s is expected,
-not a hang. `close` retracts fully.
+~75s window: the rod reaches the internal limit switch well before the window
+ends (≈25–30s for the 10 mm/s unit on hand; slower 5.7 mm/s variants take
+~45–55s) and the motor stays harmlessly energized against it (the limit switch
+opens the motor circuit) until the window ends — the command returning after
+~75s is expected, not a hang. `close` retracts fully.
 
 Exit codes during the bench: `open` exits 0; `close` exits 1 with a
 "position_unverified" log line until the reed switch is mounted — that is
