@@ -83,6 +83,15 @@ Procedure:
 5. Remove the thumb latch or fix it permanently open — the self-locking screw
    is the latch now.
 
+## Manual release
+
+With the actuator pinned to the door, the screw drive is self-locking: the door
+cannot be swung by hand, powered or not — that is what makes it predator-proof.
+For everyday manual use, open and close from the dashboard or CLI. For a power
+outage or emergency access, pull the clip and clevis pin at the actuator's door
+bracket and the door swings freely on its hinges. Use a lynch-pin style clip on
+that bracket so the release needs no tools.
+
 ## Go live
 
 ```bash
