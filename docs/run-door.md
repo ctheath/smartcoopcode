@@ -92,6 +92,12 @@ outage or emergency access, pull the clip and clevis pin at the actuator's door
 bracket and the door swings freely on its hinges. Use a lynch-pin style clip on
 that bracket so the release needs no tools.
 
+Because the actuator lives inside the run, orient that lynch pin facing the
+hardware cloth during install so it can be pulled through the mesh with
+long-nose pliers if the system ever dies with the door closed. Failing that,
+the door bracket's lag screws are reachable from the door's outside face with
+a drill.
+
 ## Go live
 
 ```bash
