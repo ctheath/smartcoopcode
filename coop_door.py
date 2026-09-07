@@ -656,6 +656,18 @@ class StateStore:
         tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         tmp_path.replace(self.path)
 
+    def clear_manual_override(self) -> None:
+        payload = self._read()
+        override_keys = [k for k in payload if k.startswith("manual_override_")]
+        if not override_keys:
+            return
+        for key in override_keys:
+            payload.pop(key, None)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp_path.replace(self.path)
+
     def active_manual_override(self, now: datetime) -> Optional[Dict[str, object]]:
         payload = self._read()
         target_state = payload.get("manual_override_target")

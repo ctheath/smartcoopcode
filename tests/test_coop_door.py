@@ -317,6 +317,22 @@ class CoopDoorStateTests(unittest.TestCase):
 
             self.assertIs(True, store.read()["last_attempt"]["contradiction"])
 
+    def test_clear_manual_override_removes_standing_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = coop_door.StateStore(Path(tmp) / "state.json")
+            store.clear_manual_override()
+            store.record_manual_override(
+                target_state=coop_door.STATE_CLOSED,
+                override_until=datetime(2026, 4, 25, 18, 30, tzinfo=DENVER),
+                set_at=datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
+            )
+
+            store.clear_manual_override()
+
+            self.assertIsNone(
+                store.active_manual_override(datetime(2026, 4, 25, 12, 30, tzinfo=DENVER))
+            )
+
     def test_manual_close_during_day_prevents_reopen_until_evening_close(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = coop_door.DoorConfig(

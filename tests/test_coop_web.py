@@ -120,6 +120,18 @@ class CoopWebAuthTests(unittest.TestCase):
 
         self.assertEqual(403, response.status_code)
 
+    def test_stale_csrf_returns_json_refresh_hint(self):
+        client = self.make_client()
+
+        response = client.post(
+            "/api/command",
+            json={"action": "open"},
+            headers={**basic_auth(), "X-CSRF-Token": "stale-token-from-old-tab"},
+        )
+
+        self.assertEqual(403, response.status_code)
+        self.assertIn("refresh", response.get_json()["error"].lower())
+
     def test_command_runs_with_basic_auth_and_csrf_header(self):
         runtime = FakeRuntime()
         client = self.make_client(runtime)
@@ -218,6 +230,30 @@ class CoopWebRuntimeTests(unittest.TestCase):
 
             self.assertEqual("closed", result["result"]["target_state"])
             self.assertEqual(["closed"], controller.moves)
+
+    def test_runtime_command_matching_schedule_clears_stale_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "state.json"
+            config = self.make_config(state_file)
+            store = coop_door.StateStore(state_file)
+            store.record_manual_override(
+                target_state=coop_door.STATE_CLOSED,
+                override_until=datetime(2026, 4, 25, 18, 30, tzinfo=DENVER),
+                set_at=datetime(2026, 4, 25, 11, 0, tzinfo=DENVER),
+            )
+            runtime = coop_web.CoopWebRuntime(
+                config=config,
+                controller=FakeDoorController(position=coop_door.STATE_CLOSED),
+                state_store=store,
+                now=lambda: datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
+                sun_provider=fixed_sun_provider,
+            )
+
+            runtime.command("open")
+
+            self.assertIsNone(
+                store.active_manual_override(datetime(2026, 4, 25, 12, 1, tzinfo=DENVER))
+            )
 
     def test_runtime_command_records_override_until_next_schedule_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:

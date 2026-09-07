@@ -201,6 +201,10 @@ class CoopWebRuntime:
                     override_until=event.next_change_at,
                     set_at=attempted_at,
                 )
+            elif result.verified:
+                # A verified command that agrees with the schedule is the
+                # user's latest intent; drop any stale contradicting override.
+                state_store.clear_manual_override()
             return {
                 "action": action,
                 "door": door,
@@ -320,7 +324,19 @@ def create_app(runtime: CoopWebRuntime, password: Optional[str] = None) -> Flask
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             csrf_header = request.headers.get("X-CSRF-Token", "")
             if not hmac.compare_digest(csrf_header, runtime.csrf_token):
-                abort(403)
+                # JSON body so the dashboard shows a human hint instead of
+                # choking on Flask's HTML 403 page.
+                return (
+                    jsonify(
+                        {
+                            "error": (
+                                "This page is stale (the service restarted) - "
+                                "refresh the browser tab and try again."
+                            )
+                        }
+                    ),
+                    403,
+                )
 
         return None
 
