@@ -136,7 +136,8 @@ coop door's sunset+30 close. Both values live in `coop_door.ini`. Note:
 | `run_position_unverified` at night | Obstruction, bracket drift, or reed misalignment | Inspect door path; re-run close; re-align magnet |
 | `run_reed_contradiction` after open | Door never moved, or reed stuck | Check actuator pins/wiring; check reed with magnet |
 | Motor hums, no motion | Supply sagging under load | Check adapter amps; try 12V/5A |
-| Stops short of fully open | Geometry uses less than full stroke | Move door bracket closer to hinge |
+| Stops short of fully open | Geometry uses less than full stroke | Move door bracket closer to hinge, or accept the swing and cap the drive with `open_travel_seconds` |
+| Open pushes the door against its stop | Drive window longer than the door's swing needs | Set `open_travel_seconds` to the measured full-open time minus ~1s |
 | Slams or strains at closed | Bracket too far from hinge | Move door bracket away from hinge |
 | Dashboard says "Door hardware is busy" (HTTP 409) | A door is mid-move; moves take up to ~75s and the doors share one motor driver | Wait for the move to finish and retry |
 | Dashboard shows "Open (assumed)" | Normal — the run door has no open sensor; open is trusted to the internal limit switch | Nothing to fix |

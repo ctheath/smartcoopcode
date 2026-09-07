@@ -127,6 +127,29 @@ class RunDoorConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 coop_door.load_config(path)
 
+    def test_open_travel_seconds_defaults_to_none_and_parses_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "coop_door.ini"
+            path.write_text("[run_door]\n", encoding="utf-8")
+            self.assertIsNone(coop_door.load_config(path).run_door.open_travel_seconds)
+
+            path.write_text(
+                "[run_door]\nopen_travel_seconds = 18\n", encoding="utf-8"
+            )
+            self.assertEqual(
+                18.0, coop_door.load_config(path).run_door.open_travel_seconds
+            )
+
+    def test_non_positive_open_travel_seconds_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "coop_door.ini"
+            path.write_text(
+                "[run_door]\nopen_travel_seconds = 0\n", encoding="utf-8"
+            )
+
+            with self.assertRaises(ValueError):
+                coop_door.load_config(path)
+
 
 class RunDoorScheduleTests(unittest.TestCase):
     def test_summer_open_floors_at_seven_am(self):
@@ -255,6 +278,20 @@ class ActuatorControllerTests(unittest.TestCase):
         self.assertEqual((coop_door.DEFAULT_RUN_IN2_PIN, gpio.LOW), gpio.outputs[-1])
         self.assertEqual((coop_door.DEFAULT_RUN_IN1_PIN, gpio.LOW), gpio.outputs[-2])
         self.assertAlmostEqual(0.3, sum(clock.sleeps), places=6)
+
+    def test_open_uses_shorter_open_travel_window_when_configured(self):
+        gpio = FakeGPIO()
+        clock = FakeClock()
+        controller = self.make_controller(
+            gpio, clock, travel_seconds=0.5, open_travel_seconds=0.2
+        )
+
+        controller.move_to(coop_door.STATE_OPEN)
+        open_sleep = sum(clock.sleeps)
+        controller.move_to(coop_door.STATE_CLOSED)
+
+        self.assertAlmostEqual(0.2, open_sleep, places=6)
+        self.assertAlmostEqual(0.7, sum(clock.sleeps), places=6)
 
     def test_close_verifies_with_reed_low(self):
         gpio = FakeGPIO()

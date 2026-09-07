@@ -47,6 +47,7 @@ class RunDoorConfig:
     in2_pin: int = DEFAULT_RUN_IN2_PIN
     reed_closed_pin: int = DEFAULT_RUN_REED_CLOSED_PIN
     travel_seconds: float = 75.0
+    open_travel_seconds: Optional[float] = None
     open_time: dt_time = dt_time(7, 0)
     close_offset_minutes: int = 35
     state_file: Path = Path("run_door_state.json")
@@ -284,6 +285,9 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> DoorConfig:
             travel_seconds=get_float(
                 "run_door", "travel_seconds", run_defaults.travel_seconds
             ),
+            open_travel_seconds=get_float(
+                "run_door", "open_travel_seconds", run_defaults.open_travel_seconds
+            ),
             open_time=open_time,
             close_offset_minutes=get_int(
                 "run_door", "close_offset_minutes", run_defaults.close_offset_minutes
@@ -294,6 +298,8 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> DoorConfig:
         )
         if run_door.travel_seconds <= 0:
             raise ValueError("run_door.travel_seconds must be greater than 0")
+        if run_door.open_travel_seconds is not None and run_door.open_travel_seconds <= 0:
+            raise ValueError("run_door.open_travel_seconds must be greater than 0")
 
     return DoorConfig(
         latitude=get_float("location", "latitude", defaults.latitude),
@@ -501,7 +507,13 @@ class ActuatorController:
             )
 
         self._drive_motor(target_state)
-        deadline = self.monotonic() + self.run_config.travel_seconds
+        # Open may use a shorter window when door geometry consumes less than
+        # the full stroke; close keeps the full window so a retract can recover
+        # from any rod position, with the internal limit switch as the stop.
+        duration = self.run_config.travel_seconds
+        if target_state == STATE_OPEN and self.run_config.open_travel_seconds is not None:
+            duration = self.run_config.open_travel_seconds
+        deadline = self.monotonic() + duration
         while self.monotonic() < deadline:
             self.sleep(self.config.motor_poll_seconds)
         self.stop_motor(target_state)
