@@ -16,7 +16,16 @@ limit switches, self-locking screw). Design spec:
 | L298N OUT3 | actuator red lead | new |
 | L298N OUT4 | actuator black lead | new |
 
-- Keep the ENA and ENB jumper caps installed on the L298N.
+- L298N boards come in two enable styles. Cap style: ENA and ENB are pin
+  pairs bridged by small jumper caps — keep both caps installed. Single-pin
+  style (the board in this coop): ENA and ENB are lone pins with no caps —
+  each needs its own jumper wire to the board's 5V screw terminal (this build
+  runs both ENA and ENB into the 5V slot, two wires under one screw, tug-test
+  each). A channel whose EN pin floats is silently, completely dead.
+- The board's GND screw must also link to the breadboard ground rail shared
+  with the Pi. If that common-ground wire is missing or half-gripped, commands
+  do nothing (or sensors misbehave while motors run) even though every signal
+  measures fine at the Pi's pins.
 - The 12V supply wiring does not change; software never runs both motors at once.
 - Power pre-flight: the wall adapter label should show 3A or more at 12V. 2A is
   likely workable at this light load. If the Pi or driver browns out during
