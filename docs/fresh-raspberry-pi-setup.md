@@ -78,7 +78,7 @@ Set:
 - `longitude`
 - `timezone`
 - GPIO pins if your wiring differs from the example
-- `motor_timeout_seconds` if your door normally takes longer than 30 seconds
+- `motor_timeout_seconds` if your door normally takes longer than 5.5 seconds (the default; full travel is ~4s)
 - `open_stop_mode`: use `brake_hold` to keep active brake after opening, or `brake_pulse` if the door holds open mechanically
 - `close_stop_mode`: keep `coast` if you like the gentle settling on close
 

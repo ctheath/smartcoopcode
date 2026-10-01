@@ -86,6 +86,7 @@ journalctl -u coop-door.service -f
 - Wi-Fi loss does not stop scheduling because sun times are computed from local coordinates.
 - The Pi's system clock is the source of local time. If it boots with an obviously stale time, the service waits and retries instead of moving the door at the wrong time.
 - If the motor runs longer than `motor_timeout_seconds` without the target reed switch triggering, the motor stops, the event is logged as `position_unverified`, and the scheduler waits for the next normal event instead of repeatedly retrying.
+- After an open reaches the reed, the controller waits `reopen_check_seconds` and re-checks the open reed. If the door slid back down (the motor brake can't hold it against gravity), it pulses open again, up to `max_reopen_attempts` times. A door that still won't stay open is logged as `position_unverified`.
 - By default, opening stops with active brake (`IN1=HIGH`, `IN2=HIGH`) and closing stops with coast (`IN1=LOW`, `IN2=LOW`).
 
 ## Tests

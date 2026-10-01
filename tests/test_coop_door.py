@@ -247,6 +247,172 @@ class CoopDoorMotorTests(unittest.TestCase):
         self.assertEqual([], gpio.outputs)
 
 
+class ScriptedReedGPIO(FakeGPIO):
+    """Open reed follows a script of (start_time, reading) steps on a FakeClock."""
+
+    def __init__(self, clock, open_reed_script):
+        super().__init__()
+        self.clock = clock
+        self.open_reed_script = open_reed_script
+
+    def input(self, pin):
+        if pin == coop_door.DEFAULT_REED_OPEN_PIN:
+            reading = self.HIGH
+            for start, value in self.open_reed_script:
+                if self.clock.now >= start:
+                    reading = value
+            return reading
+        return super().input(pin)
+
+
+class CoopDoorReopenTests(unittest.TestCase):
+    def make_controller(self, gpio, clock, **overrides):
+        config_values = {
+            "motor_timeout_seconds": 5.5,
+            "motor_poll_seconds": 0.1,
+            "reopen_check_seconds": 1.0,
+            "max_reopen_attempts": 1,
+        }
+        config_values.update(overrides)
+        logger = logging.getLogger("tests.coop_door.reopen")
+        logger.addHandler(logging.NullHandler())
+        logger.propagate = False
+        return coop_door.DoorController(
+            coop_door.DoorConfig(**config_values),
+            gpio_module=gpio,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+            logger=logger,
+        )
+
+    def open_drive_count(self, gpio):
+        return sum(
+            1
+            for i, (pin, value) in enumerate(gpio.outputs)
+            if pin == coop_door.DEFAULT_IN1_PIN
+            and value == gpio.HIGH
+            and i + 1 < len(gpio.outputs)
+            and gpio.outputs[i + 1] == (coop_door.DEFAULT_IN2_PIN, gpio.LOW)
+        )
+
+    def test_door_that_stays_open_is_not_pulsed_again(self):
+        clock = FakeClock()
+        gpio = ScriptedReedGPIO(clock, [(0.5, FakeGPIO.LOW)])
+        controller = self.make_controller(gpio, clock)
+
+        result = controller.move_to(coop_door.STATE_OPEN)
+
+        self.assertTrue(result.verified)
+        self.assertEqual(0, result.reopen_attempts)
+        self.assertEqual(1, self.open_drive_count(gpio))
+
+    def test_door_that_slides_off_open_reed_is_pulsed_open_once_more(self):
+        clock = FakeClock()
+        # Reaches the reed, slides off right away, then holds after the re-pulse.
+        gpio = ScriptedReedGPIO(
+            clock, [(0.5, FakeGPIO.LOW), (0.65, FakeGPIO.HIGH), (2.0, FakeGPIO.LOW)]
+        )
+        controller = self.make_controller(gpio, clock)
+
+        result = controller.move_to(coop_door.STATE_OPEN)
+
+        self.assertTrue(result.verified)
+        self.assertEqual(1, result.reopen_attempts)
+        self.assertEqual(coop_door.STATE_OPEN, result.position_status)
+        self.assertEqual(2, self.open_drive_count(gpio))
+
+    def test_door_that_slides_again_after_retry_is_unverified(self):
+        clock = FakeClock()
+        gpio = ScriptedReedGPIO(
+            clock,
+            [
+                (0.5, FakeGPIO.LOW),
+                (0.65, FakeGPIO.HIGH),
+                (2.0, FakeGPIO.LOW),
+                (2.15, FakeGPIO.HIGH),
+            ],
+        )
+        controller = self.make_controller(gpio, clock)
+
+        result = controller.move_to(coop_door.STATE_OPEN)
+
+        self.assertFalse(result.verified)
+        self.assertFalse(result.timed_out)
+        self.assertEqual(1, result.reopen_attempts)
+        self.assertEqual("position_unverified", result.position_status)
+        self.assertEqual(2, self.open_drive_count(gpio))
+
+    def test_reopen_pulse_obeys_motor_timeout(self):
+        clock = FakeClock()
+        # Slides off and never returns to the reed.
+        gpio = ScriptedReedGPIO(clock, [(0.5, FakeGPIO.LOW), (0.65, FakeGPIO.HIGH)])
+        controller = self.make_controller(gpio, clock)
+
+        result = controller.move_to(coop_door.STATE_OPEN)
+
+        self.assertFalse(result.verified)
+        self.assertTrue(result.timed_out)
+        self.assertEqual(1, result.reopen_attempts)
+        # 0.6s first drive + 1s check (test override) + 5.5s capped re-pulse, with slack.
+        self.assertLess(clock.now, 0.6 + 1.0 + 5.5 + 0.5)
+
+    def test_open_that_never_reaches_reed_is_not_retried(self):
+        clock = FakeClock()
+        gpio = ScriptedReedGPIO(clock, [])
+        controller = self.make_controller(gpio, clock)
+
+        result = controller.move_to(coop_door.STATE_OPEN)
+
+        self.assertFalse(result.verified)
+        self.assertTrue(result.timed_out)
+        self.assertEqual(0, result.reopen_attempts)
+        self.assertEqual(1, self.open_drive_count(gpio))
+
+    def test_zero_max_reopen_attempts_disables_retry(self):
+        clock = FakeClock()
+        gpio = ScriptedReedGPIO(clock, [(0.5, FakeGPIO.LOW), (0.65, FakeGPIO.HIGH)])
+        controller = self.make_controller(gpio, clock, max_reopen_attempts=0)
+
+        result = controller.move_to(coop_door.STATE_OPEN)
+
+        self.assertTrue(result.verified)
+        self.assertEqual(0, result.reopen_attempts)
+        self.assertEqual(1, self.open_drive_count(gpio))
+        self.assertEqual(0.0, sum(s for s in clock.sleeps if s == 1.0))
+
+    def test_close_is_never_pulsed_again(self):
+        clock = FakeClock()
+        gpio = FakeGPIO()
+        gpio.inputs[coop_door.DEFAULT_REED_CLOSED_PIN] = gpio.LOW
+        gpio.inputs[coop_door.DEFAULT_REED_OPEN_PIN] = gpio.HIGH
+        controller = self.make_controller(gpio, clock)
+
+        result = controller.move_to(coop_door.STATE_CLOSED)
+
+        self.assertTrue(result.already_in_position)
+        self.assertEqual(0, result.reopen_attempts)
+
+    def test_defaults_cap_motor_at_five_and_a_half_seconds_with_one_retry(self):
+        config = coop_door.DoorConfig()
+
+        self.assertEqual(5.5, config.motor_timeout_seconds)
+        self.assertEqual(2.0, config.reopen_check_seconds)
+        self.assertEqual(1, config.max_reopen_attempts)
+
+    def test_load_config_reads_reopen_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "coop_door.ini"
+            path.write_text(
+                "[hardware]\nreopen_check_seconds = 1.5\nmax_reopen_attempts = 0\n",
+                encoding="utf-8",
+            )
+
+            config = coop_door.load_config(path)
+
+            self.assertEqual(1.5, config.reopen_check_seconds)
+            self.assertEqual(0, config.max_reopen_attempts)
+
+
 class MovementResultStatusTests(unittest.TestCase):
     def test_position_status_prefers_contradiction_over_other_flags(self):
         result = coop_door.MovementResult(
