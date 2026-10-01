@@ -64,8 +64,10 @@ class DoorConfig:
     in2_pin: int = DEFAULT_IN2_PIN
     reed_open_pin: int = DEFAULT_REED_OPEN_PIN
     reed_closed_pin: int = DEFAULT_REED_CLOSED_PIN
-    motor_timeout_seconds: float = 30.0
+    motor_timeout_seconds: float = 5.5
     motor_poll_seconds: float = 0.1
+    reopen_check_seconds: float = 2.0
+    max_reopen_attempts: int = 1
     open_stop_mode: str = STOP_MODE_BRAKE_HOLD
     close_stop_mode: str = STOP_MODE_COAST
     brake_pulse_seconds: float = 1.0
@@ -100,6 +102,7 @@ class MovementResult:
     timed_out: bool
     already_in_position: bool
     contradiction: bool = False
+    reopen_attempts: int = 0
 
     @property
     def position_status(self) -> str:
@@ -301,6 +304,15 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> DoorConfig:
         if run_door.open_travel_seconds is not None and run_door.open_travel_seconds <= 0:
             raise ValueError("run_door.open_travel_seconds must be greater than 0")
 
+    reopen_check_seconds = get_float(
+        "hardware", "reopen_check_seconds", defaults.reopen_check_seconds
+    )
+    if reopen_check_seconds <= 0:
+        raise ValueError("hardware.reopen_check_seconds must be greater than 0")
+    max_reopen_attempts = get_int("hardware", "max_reopen_attempts", defaults.max_reopen_attempts)
+    if max_reopen_attempts < 0:
+        raise ValueError("hardware.max_reopen_attempts must be 0 or greater")
+
     return DoorConfig(
         latitude=get_float("location", "latitude", defaults.latitude),
         longitude=get_float("location", "longitude", defaults.longitude),
@@ -315,6 +327,8 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> DoorConfig:
             "hardware", "motor_timeout_seconds", defaults.motor_timeout_seconds
         ),
         motor_poll_seconds=get_float("hardware", "motor_poll_seconds", defaults.motor_poll_seconds),
+        reopen_check_seconds=reopen_check_seconds,
+        max_reopen_attempts=max_reopen_attempts,
         open_stop_mode=get_stop_mode("hardware", "open_stop_mode", defaults.open_stop_mode),
         close_stop_mode=get_stop_mode("hardware", "close_stop_mode", defaults.close_stop_mode),
         brake_pulse_seconds=brake_pulse_seconds,
@@ -370,6 +384,60 @@ class DoorController:
         if target_state == STATE_CLOSED:
             target_pin = self.config.reed_closed_pin
 
+        reached = self._drive_until_reed(target_state, target_pin)
+        if not reached:
+            return self._movement_result(target_state, False, timed_out=True)
+        if target_state != STATE_OPEN or self.config.max_reopen_attempts <= 0:
+            return self._movement_result(target_state, True, timed_out=False)
+
+        # The motor brake can't hold the door against gravity, so an open door
+        # sometimes slides straight back down off the reed. Re-pulse it open.
+        reopen_attempts = 0
+        while True:
+            self.sleep(self.config.reopen_check_seconds)
+            if self.gpio.input(target_pin) == self.gpio.LOW:
+                return self._movement_result(
+                    target_state, True, timed_out=False, reopen_attempts=reopen_attempts
+                )
+            if reopen_attempts >= self.config.max_reopen_attempts:
+                self.logger.error(
+                    "Door slid off the open reed after %d re-open attempt(s); "
+                    "position_unverified",
+                    reopen_attempts,
+                )
+                return self._movement_result(
+                    target_state, False, timed_out=False, reopen_attempts=reopen_attempts
+                )
+            reopen_attempts += 1
+            self.logger.warning(
+                "Door slid off the open reed; pulsing open again (attempt %d of %d)",
+                reopen_attempts,
+                self.config.max_reopen_attempts,
+            )
+            if not self._drive_until_reed(target_state, target_pin):
+                return self._movement_result(
+                    target_state, False, timed_out=True, reopen_attempts=reopen_attempts
+                )
+
+    def _movement_result(
+        self,
+        target_state: str,
+        verified: bool,
+        timed_out: bool,
+        reopen_attempts: int = 0,
+    ) -> MovementResult:
+        if verified:
+            self.logger.info("Door reached verified %s position", target_state)
+        return MovementResult(
+            target_state=target_state,
+            verified=verified,
+            timed_out=timed_out,
+            already_in_position=False,
+            reopen_attempts=reopen_attempts,
+        )
+
+    def _drive_until_reed(self, target_state: str, target_pin: int) -> bool:
+        """Drive toward target_state until its reed triggers; False on timeout."""
         self._drive_motor(target_state)
         deadline = self.monotonic() + self.config.motor_timeout_seconds
 
@@ -380,22 +448,11 @@ class DoorController:
                     "Motor timed out while moving %s; position_unverified",
                     target_state,
                 )
-                return MovementResult(
-                    target_state=target_state,
-                    verified=False,
-                    timed_out=True,
-                    already_in_position=False,
-                )
+                return False
             self.sleep(self.config.motor_poll_seconds)
 
         self.stop_motor(target_state)
-        self.logger.info("Door reached verified %s position", target_state)
-        return MovementResult(
-            target_state=target_state,
-            verified=True,
-            timed_out=False,
-            already_in_position=False,
-        )
+        return True
 
     def stop_motor(self, target_state: Optional[str] = None) -> None:
         if target_state == STATE_OPEN:
@@ -608,6 +665,7 @@ class StateStore:
             "timed_out": result.timed_out,
             "contradiction": result.contradiction,
             "already_in_position": result.already_in_position,
+            "reopen_attempts": result.reopen_attempts,
             "attempted_at": attempted_at.isoformat(),
         }
         payload = self._read()

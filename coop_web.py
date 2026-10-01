@@ -432,6 +432,7 @@ def _movement_result_payload(result: coop_door.MovementResult) -> Dict[str, obje
         "timed_out": result.timed_out,
         "already_in_position": result.already_in_position,
         "position_status": result.position_status,
+        "reopen_attempts": result.reopen_attempts,
     }
 
 

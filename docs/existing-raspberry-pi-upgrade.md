@@ -115,7 +115,7 @@ in1_pin = 17
 in2_pin = 27
 reed_open_pin = 22
 reed_closed_pin = 23
-motor_timeout_seconds = 30
+motor_timeout_seconds = 5.5
 motor_poll_seconds = 0.1
 open_stop_mode = brake_hold
 close_stop_mode = coast
@@ -235,4 +235,17 @@ Login:
 ```text
 Username: coop
 Password: CHANGE_THIS_PASSWORD
+```
+
+## Keep the Pi reachable on Wi-Fi
+
+With Wi-Fi power saving on, a Pi 4 can keep its outbound connections (the
+Cloudflare tunnel still works) while silently stopping answering on the LAN, so
+SSH from another machine times out. Turn it off permanently:
+
+```bash
+sudo install -m 644 systemd/wifi-powersave-off.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now wifi-powersave-off.service
+iw dev wlan0 get power_save   # should print "Power save: off"
 ```
