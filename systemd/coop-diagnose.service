@@ -1,0 +1,12 @@
+[Unit]
+Description=Coop door diagnose: read reeds and the move log, notify on problems
+After=coop-door.service
+
+[Service]
+Type=oneshot
+User=chance
+Group=chance
+WorkingDirectory=/home/chance/coophub
+ExecStart=/home/chance/coophub/.venv/bin/python /home/chance/coophub/coop_door.py --config /home/chance/coophub/coop_door.ini diagnose --notify
+# Exit code 1 = warnings, 2 = problems; both are reported, neither is a unit failure.
+SuccessExitStatus=1 2

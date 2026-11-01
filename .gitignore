@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 coop_door.ini
 *_state.json
+events.jsonl*

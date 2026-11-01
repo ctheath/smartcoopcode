@@ -75,6 +75,8 @@ class DoorConfig:
     invalid_time_retry_seconds: float = 60.0
     max_sleep_seconds: float = 3600.0
     state_file: Path = Path("coop_door_state.json")
+    event_log: Optional[Path] = None
+    notify_url: Optional[str] = None
     run_door: Optional[RunDoorConfig] = None
 
     @property
@@ -266,6 +268,11 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> DoorConfig:
         raise ValueError("hardware.brake_pulse_seconds must be greater than or equal to 0")
 
     state_file = get_path("runtime", "state_file", defaults.state_file)
+    event_log = get_path("runtime", "event_log", state_file.parent / "events.jsonl")
+
+    notify_url = None
+    if parser.has_option("notify", "url"):
+        notify_url = parser.get("notify", "url").strip() or None
 
     run_door = None
     if parser.has_section("run_door"):
@@ -338,8 +345,110 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> DoorConfig:
         ),
         max_sleep_seconds=get_float("runtime", "max_sleep_seconds", defaults.max_sleep_seconds),
         state_file=state_file,
+        event_log=event_log,
+        notify_url=notify_url,
         run_door=run_door,
     )
+
+
+class EventLog:
+    """Append-only JSONL record of every motor move, for after-the-fact diagnosis.
+
+    Each line captures which door moved, what ended the move (reed, timeout,
+    timer, already_in_position, slid_off), how long the drive ran, and what
+    every reed read before and after. ``diagnose`` reads this back.
+    """
+
+    MAX_BYTES = 1_000_000
+
+    def __init__(
+        self,
+        path: Path,
+        notify_url: Optional[str] = None,
+        logger: Optional[logging.Logger] = None,
+    ):
+        self.path = path
+        self.notify_url = notify_url
+        self.logger = logger or logging.getLogger(__name__)
+
+    def append(self, record: Dict[str, object]) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._rotate_if_large()
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, sort_keys=True) + "\n")
+        except OSError as exc:
+            self.logger.warning("Could not write event log %s: %s", self.path, exc)
+        if self.notify_url and not record.get("verified", True):
+            send_notification(
+                self.notify_url,
+                f"Coop {record.get('door', 'door')} {record.get('target_state')} failed",
+                _describe_event(record),
+                logger=self.logger,
+            )
+
+    def read(self, limit: Optional[int] = None) -> list:
+        records = []
+        for candidate in (self.path.with_suffix(self.path.suffix + ".1"), self.path):
+            if not candidate.exists():
+                continue
+            try:
+                for line in candidate.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            except OSError:
+                continue
+        if limit is not None:
+            return records[-limit:]
+        return records
+
+    def _rotate_if_large(self) -> None:
+        try:
+            if self.path.exists() and self.path.stat().st_size > self.MAX_BYTES:
+                self.path.replace(self.path.with_suffix(self.path.suffix + ".1"))
+        except OSError:
+            pass
+
+
+def _describe_event(record: Dict[str, object]) -> str:
+    parts = [
+        f"ended_by={record.get('ended_by')}",
+        f"travel={record.get('travel_seconds')}s",
+        f"timeout={record.get('timeout_seconds')}s",
+        f"reeds_after={record.get('reeds_after')}",
+    ]
+    return "; ".join(parts)
+
+
+def send_notification(
+    url: str,
+    title: str,
+    message: str,
+    logger: Optional[logging.Logger] = None,
+    timeout: float = 5.0,
+) -> bool:
+    """POST a plain-text message (ntfy-compatible). Never raises."""
+    logger = logger or logging.getLogger(__name__)
+    try:
+        from urllib import request as urllib_request
+
+        req = urllib_request.Request(
+            url,
+            data=message.encode("utf-8"),
+            headers={"Title": title, "Content-Type": "text/plain; charset=utf-8"},
+            method="POST",
+        )
+        with urllib_request.urlopen(req, timeout=timeout):
+            pass
+        return True
+    except Exception as exc:  # network errors must never break door control
+        logger.warning("Notification to %s failed: %s", url, exc)
+        return False
 
 
 class DoorController:
@@ -350,12 +459,15 @@ class DoorController:
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         logger: Optional[logging.Logger] = None,
+        event_log: Optional[EventLog] = None,
     ):
         self.config = config
         self.gpio = gpio_module or self._load_gpio()
         self.sleep = sleep
         self.monotonic = monotonic
         self.logger = logger or logging.getLogger(__name__)
+        self.event_log = event_log or _event_log_from_config(config, self.logger)
+        self.last_drive_seconds: Optional[float] = None
         self._setup_gpio()
 
     def current_position(self) -> Optional[str]:
@@ -367,10 +479,70 @@ class DoorController:
             return STATE_CLOSED
         return None
 
+    def reed_levels(self) -> Dict[str, int]:
+        """Raw reed pin levels: 0 means the magnet is on the switch."""
+        return {
+            "open": int(self.gpio.input(self.config.reed_open_pin)),
+            "closed": int(self.gpio.input(self.config.reed_closed_pin)),
+        }
+
     def move_to(self, target_state: str) -> MovementResult:
         if target_state not in {STATE_OPEN, STATE_CLOSED}:
             raise ValueError(f"Unsupported target_state: {target_state}")
 
+        reeds_before = self.reed_levels()
+        started_at = datetime.now(self.config.tz)
+        started = self.monotonic()
+        self.last_drive_seconds = None
+        result = self._move_to(target_state)
+        self._record_event(
+            door="coop",
+            result=result,
+            started_at=started_at,
+            total_seconds=self.monotonic() - started,
+            reeds_before=reeds_before,
+            reeds_after=self.reed_levels(),
+        )
+        return result
+
+    def _record_event(
+        self,
+        door: str,
+        result: MovementResult,
+        started_at: datetime,
+        total_seconds: float,
+        reeds_before: Dict[str, int],
+        reeds_after: Dict[str, int],
+    ) -> None:
+        if self.event_log is None:
+            return
+        if result.already_in_position:
+            ended_by = "already_in_position"
+        elif result.timed_out:
+            ended_by = "timeout"
+        elif result.verified:
+            ended_by = "reed"
+        else:
+            ended_by = "slid_off"
+        self.event_log.append(
+            {
+                "door": door,
+                "started_at": started_at.isoformat(),
+                "target_state": result.target_state,
+                "ended_by": ended_by,
+                "verified": result.verified,
+                "timed_out": result.timed_out,
+                "position_status": result.position_status,
+                "reopen_attempts": result.reopen_attempts,
+                "travel_seconds": _round_or_none(self.last_drive_seconds),
+                "total_seconds": round(total_seconds, 2),
+                "timeout_seconds": self.config.motor_timeout_seconds,
+                "reeds_before": reeds_before,
+                "reeds_after": reeds_after,
+            }
+        )
+
+    def _move_to(self, target_state: str) -> MovementResult:
         if self.current_position() == target_state:
             self.logger.info("Door already %s; not running motor", target_state)
             return MovementResult(
@@ -439,19 +611,29 @@ class DoorController:
     def _drive_until_reed(self, target_state: str, target_pin: int) -> bool:
         """Drive toward target_state until its reed triggers; False on timeout."""
         self._drive_motor(target_state)
-        deadline = self.monotonic() + self.config.motor_timeout_seconds
+        started = self.monotonic()
+        deadline = started + self.config.motor_timeout_seconds
 
         while self.gpio.input(target_pin):
             if self.monotonic() >= deadline:
                 self.stop_motor(target_state)
+                self.last_drive_seconds = self.monotonic() - started
                 self.logger.error(
-                    "Motor timed out while moving %s; position_unverified",
+                    "Motor timed out while moving %s after %.1fs; position_unverified",
                     target_state,
+                    self.last_drive_seconds,
                 )
                 return False
             self.sleep(self.config.motor_poll_seconds)
 
         self.stop_motor(target_state)
+        self.last_drive_seconds = self.monotonic() - started
+        self.logger.info(
+            "Reed for %s triggered after %.1fs (timeout %.1fs)",
+            target_state,
+            self.last_drive_seconds,
+            self.config.motor_timeout_seconds,
+        )
         return True
 
     def stop_motor(self, target_state: Optional[str] = None) -> None:
@@ -534,6 +716,7 @@ class ActuatorController:
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         logger: Optional[logging.Logger] = None,
+        event_log: Optional[EventLog] = None,
     ):
         if config.run_door is None:
             raise ValueError("run_door configuration is required for ActuatorController")
@@ -543,6 +726,7 @@ class ActuatorController:
         self.sleep = sleep
         self.monotonic = monotonic
         self.logger = logger or logging.getLogger(__name__)
+        self.event_log = event_log or _event_log_from_config(config, self.logger)
         self._setup_gpio()
 
     def current_position(self) -> Optional[str]:
@@ -550,10 +734,49 @@ class ActuatorController:
             return STATE_CLOSED
         return None
 
+    def reed_levels(self) -> Dict[str, int]:
+        return {"closed": int(self.gpio.input(self.run_config.reed_closed_pin))}
+
     def move_to(self, target_state: str) -> MovementResult:
         if target_state not in {STATE_OPEN, STATE_CLOSED}:
             raise ValueError(f"Unsupported target_state: {target_state}")
 
+        reeds_before = self.reed_levels()
+        started_at = datetime.now(self.config.tz)
+        started = self.monotonic()
+        result = self._move_to(target_state)
+        if self.event_log is not None:
+            if result.already_in_position:
+                ended_by = "already_in_position"
+            elif result.contradiction:
+                ended_by = "reed_contradiction"
+            elif result.verified:
+                ended_by = "timer"
+            else:
+                ended_by = "timer_unverified"
+            duration = self.run_config.travel_seconds
+            if target_state == STATE_OPEN and self.run_config.open_travel_seconds is not None:
+                duration = self.run_config.open_travel_seconds
+            self.event_log.append(
+                {
+                    "door": "run",
+                    "started_at": started_at.isoformat(),
+                    "target_state": result.target_state,
+                    "ended_by": ended_by,
+                    "verified": result.verified,
+                    "timed_out": False,
+                    "position_status": result.position_status,
+                    "reopen_attempts": 0,
+                    "travel_seconds": None if result.already_in_position else duration,
+                    "total_seconds": round(self.monotonic() - started, 2),
+                    "timeout_seconds": duration,
+                    "reeds_before": reeds_before,
+                    "reeds_after": self.reed_levels(),
+                }
+            )
+        return result
+
+    def _move_to(self, target_state: str) -> MovementResult:
         if target_state == STATE_CLOSED and self.current_position() == STATE_CLOSED:
             self.logger.info("Run door already closed; not running actuator")
             return MovementResult(
@@ -902,6 +1125,18 @@ def main(argv: Optional[list[str]] = None) -> int:
             help="Which door to control (default: coop)",
         )
     subparsers.add_parser("run", help="Run the sunrise/sunset scheduler")
+    diagnose_parser = subparsers.add_parser(
+        "diagnose", help="Read reeds and the move log; explain what is failing"
+    )
+    diagnose_parser.add_argument("--json", action="store_true", help="Print JSON")
+    diagnose_parser.add_argument(
+        "--events", type=int, default=10, help="How many recent moves to show"
+    )
+    diagnose_parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="Send findings to [notify] url when there is a problem",
+    )
 
     args = parser.parse_args(argv)
     configure_logging()
@@ -910,6 +1145,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.command == "run":
         run_forever(config)
         return 0
+
+    if args.command == "diagnose":
+        from coop_diagnose import run_diagnose_cli
+
+        return run_diagnose_cli(config, args)
 
     door = getattr(args, "door", "coop")
     if door == "run":
@@ -938,6 +1178,20 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 def _event_key(target_state: str, event_time: datetime, prefix: str = "") -> str:
     return f"{prefix}{target_state}:{event_time.isoformat()}"
+
+
+def _event_log_from_config(
+    config: DoorConfig, logger: Optional[logging.Logger] = None
+) -> Optional[EventLog]:
+    if config.event_log is None:
+        return None
+    return EventLog(config.event_log, notify_url=config.notify_url, logger=logger)
+
+
+def _round_or_none(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    return round(value, 2)
 
 
 if __name__ == "__main__":

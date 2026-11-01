@@ -1,0 +1,11 @@
+[Unit]
+Description=Run coop door diagnose after the morning open and the evening close
+
+[Timer]
+# Morning: after the latest sunrise open. Evening: after the latest sunset close.
+OnCalendar=*-*-* 09:00:00
+OnCalendar=*-*-* 22:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -586,6 +586,8 @@ class CliDoorRoutingTests(unittest.TestCase):
                 "[location]",
                 "latitude = 40.0",
                 "longitude = -105.0",
+                "[runtime]",
+                f"state_file = {Path(tmp) / 'state.json'}",
                 "[run_door]",
                 "travel_seconds = 0.05",
             ]

@@ -89,6 +89,41 @@ journalctl -u coop-door.service -f
 - After an open reaches the reed, the controller waits `reopen_check_seconds` and re-checks the open reed. If the door slid back down (the motor brake can't hold it against gravity), it pulses open again, up to `max_reopen_attempts` times. A door that still won't stay open is logged as `position_unverified`.
 - By default, opening stops with active brake (`IN1=HIGH`, `IN2=HIGH`) and closing stops with coast (`IN1=LOW`, `IN2=LOW`).
 
+## Diagnostics
+
+Every motor move is appended to `/var/lib/coop-door/events.jsonl` (one JSON line
+per move: which door, what ended it, how long the drive ran, the configured
+timeout, and every reed's level before and after). To get a plain-language read
+on what is going on:
+
+```bash
+.venv/bin/python coop_door.py --config coop_door.ini diagnose
+```
+
+It prints the live reed levels (0 = magnet on the switch), the last verified
+travel times, the recent moves, and findings such as "the last 3 opens timed out
+while the closed reed still verifies, so the fault is on the open side" or "open
+travel is 17.6s against an 18s timeout". `--json` gives the same as JSON;
+`--events N` controls how many moves are listed. The exit code is 0 when clean,
+1 with warnings, 2 with problems. The dashboard shows the same findings in its
+Errors panel, and `GET /api/diagnose` returns the report.
+
+Reading the reeds from the command line is safe while the service runs; it only
+configures inputs and never releases a pin.
+
+To get told about failures without asking, set `[notify] url` in
+`coop_door.ini` to any endpoint that accepts a plain-text POST (an
+[ntfy.sh](https://ntfy.sh) topic works as-is) and install the twice-daily check:
+
+```bash
+sudo cp systemd/coop-diagnose.service systemd/coop-diagnose.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now coop-diagnose.timer
+```
+
+A move that ends unverified notifies immediately; the timer sends the findings
+after the morning open and the evening close when anything is wrong.
+
 ## Tests
 
 ```bash

@@ -87,10 +87,11 @@ function renderStatus(status) {
   renderRunDoor(status);
 
   const errors = status.errors || [];
+  const findings = (status.findings || []).filter((f) => f.level !== "info");
   elements.errors.replaceChildren();
-  elements.errorsPanel.classList.toggle("has-errors", errors.length > 0);
+  elements.errorsPanel.classList.toggle("has-errors", errors.length + findings.length > 0);
 
-  if (errors.length === 0) {
+  if (errors.length + findings.length === 0) {
     const item = document.createElement("li");
     item.textContent = "No recent errors";
     elements.errors.append(item);
@@ -98,6 +99,11 @@ function renderStatus(status) {
     errors.forEach((error) => {
       const item = document.createElement("li");
       item.textContent = error;
+      elements.errors.append(item);
+    });
+    findings.forEach((finding) => {
+      const item = document.createElement("li");
+      item.textContent = `${finding.level.toUpperCase()}: ${finding.message}`;
       elements.errors.append(item);
     });
   }

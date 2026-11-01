@@ -16,6 +16,7 @@ from typing import Callable, Dict, Optional
 
 from flask import Flask, Response, abort, jsonify, render_template, request
 
+import coop_diagnose
 import coop_door
 
 
@@ -112,6 +113,12 @@ class CoopWebRuntime:
         if self.run_controller is not None:
             run_door_status = self._run_door_status(now, errors)
 
+        findings = []
+        try:
+            findings = self.diagnose(now=now, live=False)["findings"]
+        except Exception as exc:
+            errors.append(f"diagnose_error: {type(exc).__name__}: {exc}")
+
         return {
             "now": now.isoformat(),
             "position": position,
@@ -124,7 +131,22 @@ class CoopWebRuntime:
             "busy": busy,
             "last_attempt": last_attempt,
             "errors": errors,
+            "findings": findings,
         }
+
+    def diagnose(self, now: Optional[datetime] = None, live: bool = True) -> Dict[str, object]:
+        """Report from the move log, plus live reed levels when ``live``.
+
+        Reed reads are plain input reads and do not touch the driven pins, so
+        they are safe without the hardware lock.
+        """
+        now = now or self.now()
+        live_reeds = None
+        if live:
+            live_reeds = {"coop": self.controller.reed_levels()}
+            if self.run_controller is not None:
+                live_reeds["run"] = self.run_controller.reed_levels()
+        return coop_diagnose.diagnose(self.config, live_reeds, now=now)
 
     def _run_door_status(self, now: datetime, errors: list) -> Dict[str, object]:
         desired_state = None
@@ -347,6 +369,10 @@ def create_app(runtime: CoopWebRuntime, password: Optional[str] = None) -> Flask
     @app.get("/api/status")
     def status():
         return jsonify(runtime.get_status())
+
+    @app.get("/api/diagnose")
+    def diagnose():
+        return jsonify(runtime.diagnose())
 
     @app.post("/api/command")
     def command():
