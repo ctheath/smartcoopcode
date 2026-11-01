@@ -105,6 +105,7 @@ def build_report(
         "generated_at": now.isoformat(),
         "config": {
             "motor_timeout_seconds": config.motor_timeout_seconds,
+            "close_timeout_seconds": config.timeout_for(coop_door.STATE_CLOSED),
             "reed_open_pin": config.reed_open_pin,
             "reed_closed_pin": config.reed_closed_pin,
             "run_reed_closed_pin": (
@@ -204,6 +205,7 @@ def _coop_event_findings(
             if streak < 2:
                 continue
             pin = config.reed_open_pin if direction == coop_door.STATE_OPEN else config.reed_closed_pin
+            timeout = config.timeout_for(direction)
             other_ok = last_ok[other] is not None
             tail = (
                 f" The {other} reed still verifies, so the fault is specific to the "
@@ -218,7 +220,7 @@ def _coop_event_findings(
                     LEVEL_PROBLEM,
                     f"{direction}_reed_not_triggering",
                     f"The last {streak} {direction} moves ran to the "
-                    f"{config.motor_timeout_seconds:g}s timeout without the {direction} "
+                    f"{timeout:g}s timeout without the {direction} "
                     "reed triggering. Either the door is not reaching that end in time, "
                     f"or the {direction} reed circuit is broken.{tail}",
                 )
@@ -229,7 +231,7 @@ def _coop_event_findings(
         if event is None:
             continue
         travel = event.get("travel_seconds")
-        timeout = event.get("timeout_seconds") or config.motor_timeout_seconds
+        timeout = event.get("timeout_seconds") or config.timeout_for(direction)
         if isinstance(travel, (int, float)) and isinstance(timeout, (int, float)):
             margin = timeout - travel
             if margin < max(2.0, 0.15 * timeout):
@@ -387,7 +389,8 @@ def format_report(report: Dict[str, object]) -> str:
         )
     cfg = report["config"]
     lines.append(
-        f"Config: timeout {cfg['motor_timeout_seconds']:g}s, open reed GPIO "
+        f"Config: open timeout {cfg['motor_timeout_seconds']:g}s, close timeout "
+        f"{cfg['close_timeout_seconds']:g}s, open reed GPIO "
         f"{cfg['reed_open_pin']}, closed reed GPIO {cfg['reed_closed_pin']}, "
         f"run closed reed GPIO {cfg['run_reed_closed_pin']}, notify "
         f"{'on' if cfg['notify_url_set'] else 'off'}"

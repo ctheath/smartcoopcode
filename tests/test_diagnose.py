@@ -138,6 +138,28 @@ class ControllerEventTests(unittest.TestCase):
             self.assertAlmostEqual(0.3, record["travel_seconds"], places=1)
             self.assertEqual({"open": 1, "closed": 0}, record["reeds_after"])
 
+    def test_close_uses_its_own_timeout_when_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gpio = FakeGPIO()
+            controller = self.make_controller(
+                gpio, FakeClock(), tmp, motor_timeout_seconds=0.5, close_timeout_seconds=1.0
+            )
+
+            controller.move_to(coop_door.STATE_CLOSED)
+            controller.move_to(coop_door.STATE_OPEN)
+
+            closed, opened = controller.event_log.read()
+            self.assertEqual("timeout", closed["ended_by"])
+            self.assertAlmostEqual(1.0, closed["travel_seconds"], delta=0.15)
+            self.assertEqual(1.0, closed["timeout_seconds"])
+            self.assertAlmostEqual(0.5, opened["travel_seconds"], delta=0.15)
+            self.assertEqual(0.5, opened["timeout_seconds"])
+
+    def test_close_timeout_defaults_to_open_timeout(self):
+        config = coop_door.DoorConfig(motor_timeout_seconds=7.0)
+        self.assertEqual(7.0, config.timeout_for(coop_door.STATE_CLOSED))
+        self.assertEqual(7.0, config.timeout_for(coop_door.STATE_OPEN))
+
     def test_already_in_position_is_logged_without_travel(self):
         with tempfile.TemporaryDirectory() as tmp:
             gpio = FakeGPIO()

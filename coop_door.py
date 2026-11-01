@@ -65,6 +65,7 @@ class DoorConfig:
     reed_open_pin: int = DEFAULT_REED_OPEN_PIN
     reed_closed_pin: int = DEFAULT_REED_CLOSED_PIN
     motor_timeout_seconds: float = 5.5
+    close_timeout_seconds: Optional[float] = None
     motor_poll_seconds: float = 0.1
     reopen_check_seconds: float = 2.0
     max_reopen_attempts: int = 1
@@ -82,6 +83,12 @@ class DoorConfig:
     @property
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.timezone)
+
+    def timeout_for(self, target_state: str) -> float:
+        """Motor timeout for a direction; close falls back to the open value."""
+        if target_state == STATE_CLOSED and self.close_timeout_seconds is not None:
+            return self.close_timeout_seconds
+        return self.motor_timeout_seconds
 
 
 @dataclass(frozen=True)
@@ -333,6 +340,9 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> DoorConfig:
         motor_timeout_seconds=get_float(
             "hardware", "motor_timeout_seconds", defaults.motor_timeout_seconds
         ),
+        close_timeout_seconds=get_float(
+            "hardware", "close_timeout_seconds", defaults.close_timeout_seconds
+        ),
         motor_poll_seconds=get_float("hardware", "motor_poll_seconds", defaults.motor_poll_seconds),
         reopen_check_seconds=reopen_check_seconds,
         max_reopen_attempts=max_reopen_attempts,
@@ -536,7 +546,7 @@ class DoorController:
                 "reopen_attempts": result.reopen_attempts,
                 "travel_seconds": _round_or_none(self.last_drive_seconds),
                 "total_seconds": round(total_seconds, 2),
-                "timeout_seconds": self.config.motor_timeout_seconds,
+                "timeout_seconds": self.config.timeout_for(result.target_state),
                 "reeds_before": reeds_before,
                 "reeds_after": reeds_after,
             }
@@ -612,7 +622,8 @@ class DoorController:
         """Drive toward target_state until its reed triggers; False on timeout."""
         self._drive_motor(target_state)
         started = self.monotonic()
-        deadline = started + self.config.motor_timeout_seconds
+        timeout = self.config.timeout_for(target_state)
+        deadline = started + timeout
 
         while self.gpio.input(target_pin):
             if self.monotonic() >= deadline:
@@ -632,7 +643,7 @@ class DoorController:
             "Reed for %s triggered after %.1fs (timeout %.1fs)",
             target_state,
             self.last_drive_seconds,
-            self.config.motor_timeout_seconds,
+            timeout,
         )
         return True
 
