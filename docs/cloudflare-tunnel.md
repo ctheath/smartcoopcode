@@ -55,12 +55,10 @@ sudo systemctl status cloudflared
 
 ## 3. Verify Public Access
 
-Open the Cloudflare hostname in a browser. When prompted, use:
-
-```text
-Username: coop
-Password: the value from /etc/coop-door/web.env
-```
+Open the Cloudflare hostname in a browser and sign in on the page with the
+password from `/etc/coop-door/web.env`. Plain `http://` visits are redirected to
+`https://` by the dashboard itself. Turning on Cloudflare's "Always Use HTTPS"
+for the zone does the same at the edge and is a good belt-and-braces setting.
 
 The `/api/status` endpoint should also work through the tunnel:
 

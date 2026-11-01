@@ -257,6 +257,11 @@ class FindingsTests(unittest.TestCase):
         self.assertIn("open_timeout_margin", self.codes(report))
         self.assertEqual("warning", report["status"])
 
+    def test_deliberately_tight_timeout_is_not_nagged(self):
+        report = self.report([event(target="open", travel=17.6, timeout=19.5)])
+
+        self.assertNotIn("open_timeout_margin", self.codes(report))
+
     def test_slowing_travel_is_a_warning(self):
         events = [event(target="open", travel=t) for t in (12.0, 12.2, 12.1, 16.5)]
         report = self.report(events)
@@ -299,7 +304,7 @@ class FindingsTests(unittest.TestCase):
                 event_log=Path(tmp) / "events.jsonl",
             )
             log = coop_door.EventLog(config.event_log)
-            log.append(event(target="open", travel=19.0, timeout=19.5))
+            log.append(event(target="open", travel=19.0, timeout=19.5))  # 0.5 s spare
             store = coop_door.StateStore(config.state_file)
             store.record_manual_override(coop_door.STATE_CLOSED, NOW.replace(hour=18), NOW)
 

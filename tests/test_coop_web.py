@@ -97,13 +97,117 @@ class CoopWebAuthTests(unittest.TestCase):
         app.testing = True
         return app.test_client()
 
-    def test_status_rejects_missing_basic_auth(self):
+    def test_status_rejects_missing_auth_without_browser_prompt(self):
         client = self.make_client()
 
         response = client.get("/api/status")
 
         self.assertEqual(401, response.status_code)
-        self.assertIn("Basic", response.headers["WWW-Authenticate"])
+        # A WWW-Authenticate header would pop the browser's own password box.
+        self.assertNotIn("WWW-Authenticate", response.headers)
+
+    def test_dashboard_redirects_to_sign_in_when_signed_out(self):
+        client = self.make_client()
+
+        response = client.get("/")
+
+        self.assertEqual(302, response.status_code)
+        self.assertIn("/login", response.headers["Location"])
+        self.assertNotIn("WWW-Authenticate", response.headers)
+
+    def test_static_files_and_favicon_load_without_signing_in(self):
+        client = self.make_client()
+
+        self.assertEqual(200, client.get("/static/dashboard.css").status_code)
+        self.assertEqual(200, client.get("/favicon.ico").status_code)
+        self.assertEqual(200, client.get("/login").status_code)
+
+    def test_sign_in_sets_session_that_reaches_api_and_dashboard(self):
+        client = self.make_client()
+
+        wrong = client.post("/login", data={"password": "nope"})
+        self.assertEqual(401, wrong.status_code)
+        self.assertIn("That password didn", wrong.get_data(as_text=True))
+
+        right = client.post("/login", data={"password": "secret", "next": "/"})
+        self.assertEqual(302, right.status_code)
+        self.assertIn("coop_session", right.headers.get("Set-Cookie", ""))
+        self.assertIn("HttpOnly", right.headers.get("Set-Cookie", ""))
+
+        self.assertEqual(200, client.get("/api/status").status_code)
+        page = client.get("/")
+        self.assertEqual(200, page.status_code)
+
+    def test_session_command_needs_the_session_csrf_token(self):
+        runtime = FakeRuntime()
+        client = self.make_client(runtime)
+        client.post("/login", data={"password": "secret"})
+        with client.session_transaction() as sess:
+            token = sess["csrf"]
+
+        stale = client.post(
+            "/api/command", json={"action": "open"}, headers={"X-CSRF-Token": "stale"}
+        )
+        fresh = client.post(
+            "/api/command", json={"action": "open"}, headers={"X-CSRF-Token": token}
+        )
+
+        self.assertEqual(403, stale.status_code)
+        self.assertEqual(200, fresh.status_code)
+        self.assertEqual([("open", "coop")], runtime.commands)
+
+    def test_secure_cookie_when_visitor_is_on_https(self):
+        client = self.make_client()
+
+        response = client.post(
+            "/login", data={"password": "secret"}, headers={"X-Forwarded-Proto": "https"}
+        )
+
+        self.assertIn("Secure", response.headers.get("Set-Cookie", ""))
+
+    def test_plain_http_through_cloudflare_redirects_to_https(self):
+        client = self.make_client()
+
+        response = client.get(
+            "/login", headers={"X-Forwarded-Proto": "http", "Host": "coop.example.com"}
+        )
+
+        self.assertEqual(301, response.status_code)
+        self.assertTrue(response.headers["Location"].startswith("https://coop.example.com/"))
+
+    def test_sign_in_refuses_after_repeated_wrong_passwords(self):
+        now = {"t": 0.0}
+        throttle = coop_web.LoginThrottle(max_failures=3, window_seconds=60, clock=lambda: now["t"])
+        app = coop_web.create_app(FakeRuntime(), password="secret", throttle=throttle)
+        app.testing = True
+        client = app.test_client()
+        with patch.object(coop_web.time, "sleep"):
+            for _ in range(3):
+                client.post("/login", data={"password": "nope"})
+            blocked = client.post("/login", data={"password": "secret"})
+            now["t"] = 61.0
+            allowed = client.post("/login", data={"password": "secret"})
+
+        self.assertEqual(429, blocked.status_code)
+        self.assertEqual(302, allowed.status_code)
+
+    def test_sign_in_never_redirects_off_site(self):
+        self.assertEqual("/", coop_web._safe_next("https://evil.example/"))
+        self.assertEqual("/", coop_web._safe_next("//evil.example/"))
+        self.assertEqual("/", coop_web._safe_next("/login"))
+        self.assertEqual("/?x=1", coop_web._safe_next("/?x=1"))
+
+    def test_secret_key_persists_next_to_state_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = FakeRuntime()
+            runtime.config = coop_door.DoorConfig(state_file=Path(tmp) / "state.json")
+
+            first = coop_web._load_secret_key(runtime)
+            second = coop_web._load_secret_key(runtime)
+
+            self.assertEqual(first, second)
+            mode = (Path(tmp) / "web_secret_key").stat().st_mode & 0o777
+            self.assertEqual(0o600, mode)
 
     def test_status_accepts_correct_basic_auth(self):
         client = self.make_client()
@@ -301,12 +405,30 @@ class CoopWebRuntimeTests(unittest.TestCase):
             self.assertEqual("closed", status["manual_override"]["target_state"])
             self.assertEqual("2026-04-25T18:30:00-06:00", status["manual_override"]["until"])
 
-    def test_dashboard_uses_schedule_now_and_next_wording(self):
+    def test_dashboard_has_the_door_drawing_and_sensor_readouts(self):
         template = Path("web/templates/dashboard.html").read_text(encoding="utf-8")
 
-        self.assertIn("Schedule Now", template)
-        self.assertIn("Next scheduled change unknown", template)
+        self.assertIn('id="door-panel"', template)
+        self.assertIn('id="sensor-open"', template)
+        self.assertIn('id="sensor-closed"', template)
+        self.assertIn('id="moves"', template)
         self.assertNotIn("Scheduled Target", template)
+
+    def test_status_includes_todays_open_and_close_times(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self.make_config(Path(tmp) / "state.json")
+            runtime = coop_web.CoopWebRuntime(
+                config=config,
+                controller=FakeDoorController(position=coop_door.STATE_OPEN),
+                now=lambda: datetime(2026, 4, 25, 12, 0, tzinfo=DENVER),
+                sun_provider=fixed_sun_provider,
+            )
+
+            today = runtime.get_status()["today"]
+
+        self.assertEqual("2026-04-25T07:00:00-06:00", today["open_at"])
+        self.assertEqual("2026-04-25T18:30:00-06:00", today["close_at"])
+        self.assertEqual("2026-04-25T18:00:00-06:00", today["sunset"])
 
     def test_runtime_status_reports_hardware_read_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -508,7 +630,7 @@ class RunDoorWebTests(unittest.TestCase):
         self.assertIn('id="run-door-section"', template)
         self.assertIn('data-door="run"', template)
         self.assertIn('data-door="coop"', template)
-        self.assertIn("Run Door", template)
+        self.assertIn("Run door", template)
 
         css = Path("web/static/dashboard.css").read_text(encoding="utf-8")
         self.assertIn("[hidden]", css)

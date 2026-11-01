@@ -2,71 +2,132 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Coop Door</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Coop door</title>
+    <meta name="theme-color" content="{{ '#0e1730' if time_of_day == 'night' else '#8fbfd8' }}">
+    <link rel="icon" href="{{ url_for('favicon') }}" type="image/svg+xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Big+Shoulders+Display:wght@700;800&display=swap">
     <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
   </head>
-  <body>
-    <main class="shell">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">Smart Coop</p>
-          <h1>Door Control</h1>
-        </div>
-        <div id="connection" class="pill">Checking</div>
+  <body data-time="{{ time_of_day }}">
+    <main class="page">
+      <header class="masthead">
+        <p class="wordmark">Smart Coop</p>
+        <p id="connection" class="link" role="status">
+          <span class="link-dot" aria-hidden="true"></span>
+          <span id="connection-text">Connecting</span>
+        </p>
       </header>
 
-      <section class="status-grid" aria-label="Door status">
-        <article class="panel primary-status">
-          <span class="label">Current Position</span>
-          <strong id="position">Unknown</strong>
-          <span id="busy" class="hint">Idle</span>
-        </article>
-        <article class="panel">
-          <span class="label">Schedule Now</span>
-          <strong id="desired">Unknown</strong>
-          <span id="next-change" class="hint">Next scheduled change unknown</span>
-          <span id="manual-override" class="hint"></span>
-        </article>
-      </section>
+      <section class="scene" aria-labelledby="position">
+        <svg class="scene-art" viewBox="0 0 400 420" role="img" aria-labelledby="scene-title">
+          <title id="scene-title">The coop wall, with the sliding door drawn where the real door is</title>
+          <defs>
+            <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+              <stop class="sky-top" offset="0"/>
+              <stop class="sky-bottom" offset="1"/>
+            </linearGradient>
+            <clipPath id="wall-clip"><rect x="0" y="136" width="400" height="264"/></clipPath>
+          </defs>
+          <rect width="400" height="420" fill="url(#sky)"/>
+          <g class="stars" aria-hidden="true">
+            <circle cx="48" cy="38" r="1.4"/><circle cx="96" cy="84" r="1"/><circle cx="148" cy="30" r="1.2"/>
+            <circle cx="236" cy="52" r="1"/><circle cx="292" cy="24" r="1.5"/><circle cx="352" cy="70" r="1.1"/>
+            <circle cx="320" cy="112" r="0.9"/><circle cx="70" cy="118" r="1"/>
+            <path class="moon" d="M318 54a20 20 0 1 0 22 26 16 16 0 1 1-22-26z"/>
+          </g>
+          <path id="day-arc" class="day-arc" d="M20 190 A180 170 0 0 1 380 190"/>
+          <g id="sun" class="sun" transform="translate(200 20)">
+            <circle r="26" class="sun-glow"/>
+            <circle r="13" class="sun-disc"/>
+          </g>
 
-      <section id="run-door-section" class="status-grid" aria-label="Run door status" hidden>
-        <article class="panel primary-status">
-          <span class="label">Run Door Position</span>
-          <strong id="run-position">Unknown</strong>
-          <span id="run-busy" class="hint"></span>
-        </article>
-        <article class="panel">
-          <span class="label">Run Schedule Now</span>
-          <strong id="run-desired">Unknown</strong>
-          <span id="run-next-change" class="hint">Next scheduled change unknown</span>
-          <span id="run-manual-override" class="hint"></span>
-        </article>
-      </section>
+          <g class="coop">
+            <polygon class="eave" points="-10,140 410,140 400,120 0,120"/>
+            <rect class="wall" x="0" y="136" width="400" height="264"/>
+            <g class="boards" clip-path="url(#wall-clip)">
+              <line x1="25" y1="136" x2="25" y2="400"/><line x1="58" y1="136" x2="58" y2="400"/>
+              <line x1="91" y1="136" x2="91" y2="400"/><line x1="124" y1="136" x2="124" y2="400"/>
+              <line x1="276" y1="136" x2="276" y2="400"/><line x1="309" y1="136" x2="309" y2="400"/>
+              <line x1="342" y1="136" x2="342" y2="400"/><line x1="375" y1="136" x2="375" y2="400"/>
+            </g>
+            <rect class="opening" x="150" y="290" width="100" height="100"/>
+            <path class="hen" d="M182 390c-2-14 4-26 16-30 2-9 9-14 16-11 4 1 6 5 5 9l7 3-7 2c0 4-2 7-5 9 10 3 16 10 16 18z"/>
+            <rect class="rail" x="140" y="146" width="10" height="250"/>
+            <rect class="rail" x="250" y="146" width="10" height="250"/>
+            <rect class="bracket" x="186" y="140" width="28" height="6"/>
+            <circle class="spool" cx="200" cy="156" r="10"/>
+            <circle class="spool-hub" cx="200" cy="156" r="3"/>
+            <rect id="door-string" class="string" x="199.25" y="166" width="1.5" height="124"/>
+            <g id="door-panel" class="door-panel">
+              <rect class="panel-face" x="150" y="290" width="100" height="100"/>
+              <line x1="150" y1="315" x2="250" y2="315"/>
+              <line x1="150" y1="340" x2="250" y2="340"/>
+              <line x1="150" y1="365" x2="250" y2="365"/>
+              <path class="brace" d="M157 312 L243 372"/>
+              <circle class="magnet" cx="200" cy="296" r="3.5"/>
+            </g>
+            <rect class="ground" x="0" y="390" width="400" height="30"/>
+          </g>
+        </svg>
 
-      <section class="panel actions" aria-label="Manual controls">
-        <div>
-          <span class="label">Manual Control</span>
-          <p id="command-result" class="hint">Commands move the door now and hold until the next scheduled change.</p>
+        <div class="day-ends">
+          <span id="opens-at">Opens at sunrise</span>
+          <span id="closes-at">Closes after sunset</span>
         </div>
-        <div class="button-row">
-          <button id="open-button" type="button" data-action="open" data-door="coop">Open Coop</button>
-          <button id="close-button" type="button" data-action="closed" data-door="coop">Close Coop</button>
-          <button id="run-open-button" type="button" data-action="open" data-door="run" hidden>Open Run</button>
-          <button id="run-close-button" type="button" data-action="closed" data-door="run" hidden>Close Run</button>
+
+        <div class="readout">
+          <h1 id="position" class="state-word">Checking</h1>
+          <p id="state-detail" class="state-detail">Reading the door sensors.</p>
         </div>
       </section>
 
-      <section class="panel errors" aria-label="Errors">
-        <span class="label">Errors</span>
-        <ul id="errors">
-          <li>No recent errors</li>
-        </ul>
-      </section>
+      <div class="side">
+        <section class="controls" aria-label="Coop door controls">
+          <div class="button-pair">
+            <button id="open-button" class="move" type="button" data-action="open" data-door="coop" data-label="Open coop door">Open coop door</button>
+            <button id="close-button" class="move" type="button" data-action="closed" data-door="coop" data-label="Close coop door">Close coop door</button>
+          </div>
+          <p id="command-result" class="command-result" role="status" aria-live="polite">Tap a button twice to move the door. It holds there until the next scheduled change.</p>
+        </section>
 
-      <footer>
-        <span id="updated">Not updated yet</span>
-      </footer>
+        <section id="run-door-section" class="run" aria-labelledby="run-heading" hidden>
+          <div class="run-copy">
+            <h2 id="run-heading">Run door</h2>
+            <p class="run-state"><strong id="run-state">Checking</strong> <span id="run-detail"></span></p>
+          </div>
+          <div class="button-pair small">
+            <button id="run-open-button" class="move secondary" type="button" data-action="open" data-door="run" data-label="Open run" hidden>Open run</button>
+            <button id="run-close-button" class="move secondary" type="button" data-action="closed" data-door="run" data-label="Close run" hidden>Close run</button>
+          </div>
+        </section>
+
+        <section class="health" aria-labelledby="health-heading">
+          <h2 id="health-heading">Health</h2>
+          <ul id="attention" class="attention">
+            <li class="calm">Checking.</li>
+          </ul>
+          <div class="sensors" aria-label="Live sensor readings">
+            <p class="sensor" id="sensor-open"><span class="led" aria-hidden="true"></span>Top sensor <span class="sensor-state">checking</span></p>
+            <p class="sensor" id="sensor-closed"><span class="led" aria-hidden="true"></span>Bottom sensor <span class="sensor-state">checking</span></p>
+            <p class="sensor" id="sensor-run" hidden><span class="led" aria-hidden="true"></span>Run door sensor <span class="sensor-state">checking</span></p>
+          </div>
+        </section>
+
+        <section class="log" aria-labelledby="log-heading">
+          <h2 id="log-heading">Recent moves</h2>
+          <ol id="moves" class="moves">
+            <li class="empty">No moves recorded yet. The next open or close will show up here.</li>
+          </ol>
+        </section>
+
+        <footer class="foot">
+          <span id="updated">Not updated yet</span>
+          <button id="sign-out" class="text-button" type="button">Sign out</button>
+        </footer>
+      </div>
     </main>
 
     <script>

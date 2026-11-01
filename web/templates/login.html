@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Sign in to the coop</title>
+    <meta name="theme-color" content="#1b2945">
+    <link rel="icon" href="{{ url_for('favicon') }}" type="image/svg+xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Big+Shoulders+Display:wght@700;800&display=swap">
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+  </head>
+  <body data-time="night" class="login-body">
+    <main class="login">
+      <svg class="login-art" viewBox="0 0 120 120" aria-hidden="true">
+        <polygon class="eave" points="4,40 116,40 108,28 12,28"/>
+        <rect class="wall" x="10" y="38" width="100" height="74"/>
+        <rect class="rail" x="40" y="48" width="5" height="62"/>
+        <rect class="rail" x="75" y="48" width="5" height="62"/>
+        <rect class="panel-face" x="45" y="68" width="30" height="42"/>
+        <line class="panel-line" x1="45" y1="82" x2="75" y2="82"/>
+        <line class="panel-line" x1="45" y1="96" x2="75" y2="96"/>
+        <path class="moon" d="M92 6a10 10 0 1 0 11 13 8 8 0 1 1-11-13z"/>
+      </svg>
+      <h1 class="login-title">Coop door</h1>
+      <p class="login-lede">Sign in to see the door and move it.</p>
+      <form method="post" action="{{ url_for('login') }}" class="login-form">
+        <input type="hidden" name="next" value="{{ next_url }}">
+        <input type="text" name="username" value="coop" autocomplete="username" hidden>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required autofocus
+               {% if error %}aria-invalid="true" aria-describedby="login-error"{% endif %}>
+        {% if error %}<p id="login-error" class="login-error" role="alert">{{ error }}</p>{% endif %}
+        <button type="submit" class="move">Sign in</button>
+      </form>
+      <p class="login-note">You'll stay signed in on this device for 30 days.</p>
+    </main>
+  </body>
+</html>

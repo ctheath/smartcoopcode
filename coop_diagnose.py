@@ -22,6 +22,9 @@ LEVEL_WARNING = "warning"
 LEVEL_INFO = "info"
 
 RECENT_WINDOW = 20
+# Warn when a verified move finished this close to its timeout. Kept small on
+# purpose: the open timeout is set tight to protect the top of the track.
+TIMEOUT_MARGIN_SECONDS = 1.0
 
 
 def read_live_reeds(config: coop_door.DoorConfig, gpio_module=None) -> Dict[str, Dict[str, int]]:
@@ -234,15 +237,15 @@ def _coop_event_findings(
         timeout = event.get("timeout_seconds") or config.timeout_for(direction)
         if isinstance(travel, (int, float)) and isinstance(timeout, (int, float)):
             margin = timeout - travel
-            if margin < max(2.0, 0.15 * timeout):
+            if margin < TIMEOUT_MARGIN_SECONDS:
                 out.append(
                     _finding(
                         LEVEL_WARNING,
                         f"{direction}_timeout_margin",
                         f"The last verified {direction} took {travel:g}s against a "
                         f"{timeout:g}s timeout, only {margin:.1f}s to spare. A cold "
-                        "morning or a sticky track will time it out. Raise "
-                        "motor_timeout_seconds.",
+                        "morning or a sticky track could time it out. Check the track, "
+                        f"or raise the {direction} timeout.",
                     )
                 )
         trend = _slowing_trend(recent, direction)

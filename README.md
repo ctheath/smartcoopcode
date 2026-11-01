@@ -42,7 +42,7 @@ export COOP_WEB_PASSWORD='replace-with-a-long-password'
 .venv/bin/python coop_web.py --config coop_door.ini --host 127.0.0.1 --port 8080
 ```
 
-Open `http://127.0.0.1:8080` and sign in with username `coop` and the password from `COOP_WEB_PASSWORD`.
+Open `http://127.0.0.1:8080` and sign in with the password from `COOP_WEB_PASSWORD`. The browser stays signed in for 30 days; the signing key lives next to the state file (`web_secret_key`), so service restarts don't sign you out. Scripts can still use HTTP Basic Auth with username `coop`, for example `curl -u coop:PASSWORD .../api/status`. Visits over plain http through Cloudflare are redirected to https, and repeated wrong passwords lock sign-in for 15 minutes.
 
 For hosted access, expose the local dashboard with Cloudflare Tunnel. See `docs/cloudflare-tunnel.md`.
 

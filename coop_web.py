@@ -10,11 +10,24 @@ import os
 import secrets
 import sys
 import threading
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, Optional
+from urllib.parse import urlsplit
 
-from flask import Flask, Response, abort, jsonify, render_template, request
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+    session,
+    url_for,
+)
+from flask.sessions import SecureCookieSessionInterface
 
 import coop_diagnose
 import coop_door
@@ -23,6 +36,51 @@ import coop_door
 WEB_USERNAME = "coop"
 DEFAULT_WEB_HOST = "127.0.0.1"
 DEFAULT_WEB_PORT = 8080
+
+SESSION_LIFETIME = timedelta(days=30)
+SECRET_KEY_FILENAME = "web_secret_key"
+# Pages and assets a signed-out browser may load: the sign-in page itself,
+# its stylesheet and script, and the tab icon. Nothing here reveals door state.
+PUBLIC_ENDPOINTS = {"login", "static", "favicon"}
+LOGIN_MAX_FAILURES = 8
+LOGIN_FAILURE_WINDOW_SECONDS = 15 * 60
+
+
+class LoginThrottle:
+    """Refuse sign-in from a client after repeated wrong passwords."""
+
+    def __init__(self, max_failures: int = LOGIN_MAX_FAILURES,
+                 window_seconds: float = LOGIN_FAILURE_WINDOW_SECONDS,
+                 clock: Callable[[], float] = time.monotonic):
+        self.max_failures = max_failures
+        self.window_seconds = window_seconds
+        self.clock = clock
+        self._failures: Dict[str, list] = {}
+        self._lock = threading.Lock()
+
+    def blocked(self, client: str) -> bool:
+        with self._lock:
+            return len(self._recent(client)) >= self.max_failures
+
+    def record_failure(self, client: str) -> None:
+        with self._lock:
+            self._failures[client] = self._recent(client) + [self.clock()]
+
+    def reset(self, client: str) -> None:
+        with self._lock:
+            self._failures.pop(client, None)
+
+    def _recent(self, client: str) -> list:
+        cutoff = self.clock() - self.window_seconds
+        return [t for t in self._failures.get(client, []) if t > cutoff]
+
+
+class _ForwardedSecureSessionInterface(SecureCookieSessionInterface):
+    """Mark the cookie Secure whenever the visitor is on https, including
+    through Cloudflare, where the Pi itself only ever sees plain http."""
+
+    def get_cookie_secure(self, app) -> bool:
+        return _request_is_https()
 
 
 class CoopBusyError(RuntimeError):
@@ -72,11 +130,13 @@ class CoopWebRuntime:
         next_scheduled_action = None
         next_change_at = None
 
+        today = None
         try:
             event = coop_door.desired_event_for_now(now, self.config, self.sun_provider)
             scheduled_state_now = event.target_state
             next_scheduled_action = _next_scheduled_action_for_event(event)
             next_change_at = event.next_change_at.isoformat()
+            today = self._today_schedule(now)
         except Exception as exc:
             errors.append(f"schedule_error: {type(exc).__name__}: {exc}")
 
@@ -126,12 +186,24 @@ class CoopWebRuntime:
             "scheduled_state_now": scheduled_state_now,
             "next_scheduled_action": next_scheduled_action,
             "next_change_at": next_change_at,
+            "today": today,
             "manual_override": manual_override,
             "run_door": run_door_status,
             "busy": busy,
             "last_attempt": last_attempt,
             "errors": errors,
             "findings": findings,
+        }
+
+    def _today_schedule(self, now: datetime) -> Dict[str, str]:
+        day = now.astimezone(self.config.tz).date()
+        sun_times = self.sun_provider(self.config, day)
+        schedule = coop_door.calculate_schedule(day, self.config, self.sun_provider)
+        return {
+            "sunrise": sun_times["sunrise"].isoformat(),
+            "sunset": sun_times["sunset"].isoformat(),
+            "open_at": schedule.open_at.isoformat(),
+            "close_at": schedule.close_at.isoformat(),
         }
 
     def diagnose(self, now: Optional[datetime] = None, live: bool = True) -> Dict[str, object]:
@@ -326,7 +398,12 @@ class CoopWebRuntime:
             self._last_scheduler_exception = message
 
 
-def create_app(runtime: CoopWebRuntime, password: Optional[str] = None) -> Flask:
+def create_app(
+    runtime: CoopWebRuntime,
+    password: Optional[str] = None,
+    secret_key: Optional[bytes] = None,
+    throttle: Optional[LoginThrottle] = None,
+) -> Flask:
     password = password or os.environ.get("COOP_WEB_PASSWORD")
     if not password:
         raise RuntimeError("COOP_WEB_PASSWORD must be set before starting the coop dashboard")
@@ -337,15 +414,38 @@ def create_app(runtime: CoopWebRuntime, password: Optional[str] = None) -> Flask
         static_folder=str(app_root / "web" / "static"),
         template_folder=str(app_root / "web" / "templates"),
     )
+    app.secret_key = secret_key or _load_secret_key(runtime)
+    app.session_interface = _ForwardedSecureSessionInterface()
+    app.config.update(
+        SESSION_COOKIE_NAME="coop_session",
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        PERMANENT_SESSION_LIFETIME=SESSION_LIFETIME,
+    )
+    throttle = throttle or LoginThrottle()
 
     @app.before_request
     def protect_routes():
-        if not _basic_auth_valid(request.authorization, password):
-            return _basic_auth_challenge()
+        # Cloudflare serves plain http too; a password must never cross it.
+        if request.headers.get("X-Forwarded-Proto", "").lower() == "http":
+            return redirect(request.url.replace("http://", "https://", 1), code=301)
+
+        if request.endpoint in PUBLIC_ENDPOINTS:
+            return None
+
+        via_session = session.get("auth") is True
+        via_basic = not via_session and _basic_auth_valid(request.authorization, password)
+        if not (via_session or via_basic):
+            if request.path.startswith("/api/"):
+                # No WWW-Authenticate header: it would make the browser pop its
+                # own password box on top of the sign-in page.
+                return jsonify({"error": "Signed out. Reload the page to sign in."}), 401
+            return redirect(url_for("login", next=request.full_path.rstrip("?")))
 
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            expected = session.get("csrf") if via_session else runtime.csrf_token
             csrf_header = request.headers.get("X-CSRF-Token", "")
-            if not hmac.compare_digest(csrf_header, runtime.csrf_token):
+            if not expected or not hmac.compare_digest(csrf_header, expected):
                 # JSON body so the dashboard shows a human hint instead of
                 # choking on Flask's HTML 403 page.
                 return (
@@ -362,9 +462,47 @@ def create_app(runtime: CoopWebRuntime, password: Optional[str] = None) -> Flask
 
         return None
 
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        next_url = _safe_next(request.values.get("next"))
+        if session.get("auth") is True:
+            return redirect(next_url)
+
+        error = None
+        if request.method == "POST":
+            client = _client_id()
+            if throttle.blocked(client):
+                error = "Too many wrong passwords. Wait 15 minutes and try again."
+            elif hmac.compare_digest(request.form.get("password", ""), password):
+                throttle.reset(client)
+                session.clear()
+                session.permanent = True
+                session["auth"] = True
+                session["csrf"] = secrets.token_urlsafe(32)
+                return redirect(next_url)
+            else:
+                throttle.record_failure(client)
+                time.sleep(0.5)
+                error = "That password didn't work."
+
+        status = 429 if error and error.startswith("Too many") else (401 if error else 200)
+        return render_template("login.html", error=error, next_url=next_url), status
+
+    @app.post("/logout")
+    def logout():
+        session.clear()
+        return jsonify({"ok": True})
+
+    @app.get("/favicon.ico")
+    def favicon():
+        return send_from_directory(app.static_folder, "favicon.svg", mimetype="image/svg+xml")
+
     @app.get("/")
     def dashboard():
-        return render_template("dashboard.html", csrf_token=runtime.csrf_token)
+        csrf_token = session.get("csrf") or runtime.csrf_token
+        return render_template(
+            "dashboard.html", csrf_token=csrf_token, time_of_day=_time_of_day(runtime)
+        )
 
     @app.get("/api/status")
     def status():
@@ -432,6 +570,61 @@ def main(argv: Optional[list[str]] = None) -> int:
     return 0
 
 
+def _time_of_day(runtime) -> str:
+    """Night while the coop is scheduled closed, so the first paint already
+    matches the sky instead of flashing from day to night."""
+    try:
+        now = runtime.now()
+        event = coop_door.desired_event_for_now(now, runtime.config, runtime.sun_provider)
+    except Exception:
+        return "day"
+    return "night" if event.target_state == coop_door.STATE_CLOSED else "day"
+
+
+def _request_is_https() -> bool:
+    return request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+
+
+def _client_id() -> str:
+    return request.headers.get("CF-Connecting-IP") or request.remote_addr or "unknown"
+
+
+def _safe_next(value: Optional[str]) -> str:
+    """Only follow same-site relative paths after sign-in."""
+    if not value or not value.startswith("/") or value.startswith("//"):
+        return "/"
+    parts = urlsplit(value)
+    if parts.scheme or parts.netloc or parts.path.startswith("/login"):
+        return "/"
+    return value
+
+
+def _load_secret_key(runtime) -> bytes:
+    """A signing key kept next to the state file, so a service restart does
+    not sign everyone out. Falls back to a per-process key without a config."""
+    config = getattr(runtime, "config", None)
+    state_file = getattr(config, "state_file", None)
+    if state_file is None:
+        return secrets.token_bytes(32)
+    path = Path(state_file).parent / SECRET_KEY_FILENAME
+    try:
+        if path.exists():
+            key = path.read_bytes()
+            if len(key) >= 32:
+                return key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        key = secrets.token_bytes(32)
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(key)
+        return key
+    except OSError:
+        logging.getLogger(__name__).warning(
+            "Could not persist web secret key at %s; sessions reset on restart", path
+        )
+        return secrets.token_bytes(32)
+
+
 def _basic_auth_valid(auth, password: str) -> bool:
     if not auth:
         return False
@@ -440,14 +633,6 @@ def _basic_auth_valid(auth, password: str) -> bool:
     return hmac.compare_digest(username, WEB_USERNAME) and hmac.compare_digest(
         candidate_password,
         password,
-    )
-
-
-def _basic_auth_challenge() -> Response:
-    return Response(
-        "Authentication required\n",
-        401,
-        {"WWW-Authenticate": 'Basic realm="Coop Door", charset="UTF-8"'},
     )
 
 
