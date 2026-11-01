@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -427,7 +428,7 @@ def create_app(
     @app.before_request
     def protect_routes():
         # Cloudflare serves plain http too; a password must never cross it.
-        if request.headers.get("X-Forwarded-Proto", "").lower() == "http":
+        if _visitor_scheme() == "http":
             return redirect(request.url.replace("http://", "https://", 1), code=301)
 
         if request.endpoint in PUBLIC_ENDPOINTS:
@@ -581,8 +582,30 @@ def _time_of_day(runtime) -> str:
     return "night" if event.target_state == coop_door.STATE_CLOSED else "day"
 
 
+def _visitor_scheme() -> Optional[str]:
+    """The scheme the visitor used to reach Cloudflare, or None when the
+    request did not come through a proxy (e.g. curl on the Pi itself).
+
+    Cloudflare sends both CF-Visitor and X-Forwarded-Proto. Waitress strips
+    X-Forwarded-* from proxies it hasn't been told to trust, so CF-Visitor is
+    the one that reliably survives; X-Forwarded-Proto is the fallback.
+    """
+    visitor = request.headers.get("CF-Visitor")
+    if visitor:
+        try:
+            scheme = json.loads(visitor).get("scheme")
+        except (ValueError, AttributeError):
+            scheme = None
+        if scheme in {"http", "https"}:
+            return scheme
+    forwarded = request.headers.get("X-Forwarded-Proto", "").strip().lower()
+    if forwarded in {"http", "https"}:
+        return forwarded
+    return None
+
+
 def _request_is_https() -> bool:
-    return request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+    return request.is_secure or _visitor_scheme() == "https"
 
 
 def _client_id() -> str:

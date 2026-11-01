@@ -165,6 +165,24 @@ class CoopWebAuthTests(unittest.TestCase):
 
         self.assertIn("Secure", response.headers.get("Set-Cookie", ""))
 
+    def test_cloudflare_visitor_header_drives_https_redirect_and_secure_cookie(self):
+        client = self.make_client()
+
+        plain = client.get(
+            "/login", headers={"CF-Visitor": '{"scheme":"http"}', "Host": "coop.example.com"}
+        )
+        secure = client.post(
+            "/login",
+            data={"password": "secret"},
+            headers={"CF-Visitor": '{"scheme":"https"}'},
+        )
+        direct = client.get("/login")
+
+        self.assertEqual(301, plain.status_code)
+        self.assertTrue(plain.headers["Location"].startswith("https://coop.example.com/"))
+        self.assertIn("Secure", secure.headers.get("Set-Cookie", ""))
+        self.assertEqual(200, direct.status_code)
+
     def test_plain_http_through_cloudflare_redirects_to_https(self):
         client = self.make_client()
 
