@@ -176,7 +176,7 @@ class CoopWebAuthTests(unittest.TestCase):
             data={"password": "secret"},
             headers={"CF-Visitor": '{"scheme":"https"}'},
         )
-        direct = client.get("/login")
+        direct = self.make_client().get("/login")
 
         self.assertEqual(301, plain.status_code)
         self.assertTrue(plain.headers["Location"].startswith("https://coop.example.com/"))
